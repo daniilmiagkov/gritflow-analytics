@@ -1,112 +1,170 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from processing.config import *
+from processing.config import (
+    DEPTH_MIN, DEPTH_MAX, SLOPE_CORRECTION, 
+    USE_COLOR_SEGMENTATION, COLOR_WEIGHT, DEPTH_WEIGHT,
+    ADAPTIVE_THRESH, BINARY_THRESH,
+    MORPH_KERNEL_SIZE, MORPH_ITERATIONS,
+    DISTANCE_TRANSFORM_MASK, FOREGROUND_THRESHOLD_RATIO, DILATE_ITERATIONS,
+    MIN_PARTICLE_SIZE, MAX_PARTICLE_SIZE,
+    BBOX_COLOR, BBOX_THICKNESS, FONT_SCALE, FONT_THICKNESS,
+    SHOW_PLOTS, PLOT_FIGSIZE
+)
 
-def analyze_frame(image_np, depth_np, show_plots=SHOW_PLOTS):
-    plt.figure(figsize=PLOT_FIGSIZE)
-    
-    # 1. Очистка глубины
-    depth_clean = np.where((depth_np > DEPTH_MIN) & (depth_np < DEPTH_MAX), depth_np, 0).astype(np.float32)
-    depth_norm = cv2.normalize(depth_clean, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    depth_blur = cv2.medianBlur(depth_norm, MEDIAN_BLUR_SIZE)
-    
-    if show_plots:
-        plt.subplot(3, 4, 1)
-        plt.imshow(depth_clean, cmap='jet')
-        plt.title('1. Очищенная глубина')
-        plt.colorbar()
-        
-        plt.subplot(3, 4, 2)
-        plt.imshow(depth_blur, cmap='gray')
-        plt.title('2. После медианного фильтра')
+def correct_slope(depth_map: np.ndarray) -> np.ndarray:
+    """
+    Fit a plane to the depth_map and subtract it to level the scene.
+    Vectorized per-pixel correction via meshgrid and SVD on downsampled points.
+    """
+    h, w = depth_map.shape
+    # Downscale factor based on memory footprint
+    scale = 0.1 if depth_map.nbytes > 100e6 else 0.25
 
-    # 2. Бинаризация
-    _, depth_bin = cv2.threshold(depth_blur, BINARY_THRESH, 255, cv2.THRESH_BINARY)
-    
-    if show_plots:
-        plt.subplot(3, 4, 3)
-        plt.imshow(depth_bin, cmap='gray')
-        plt.title('3. Бинаризация')
+    small = cv2.resize(depth_map, (0, 0), fx=scale, fy=scale,
+                       interpolation=cv2.INTER_AREA)
+    mask = small > DEPTH_MIN
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 100:
+        return depth_map  # Not enough valid points
 
-    # 3. Морфология
+    zs = small[ys, xs]
+    xs_full = xs / scale
+    ys_full = ys / scale
+    pts = np.stack([xs_full, ys_full, zs], axis=1)
+
+    # Compute best-fit plane via SVD (normal = last row of Vt) :contentReference[oaicite:7]{index=7}
+    centroid = pts.mean(axis=0)
+    _, _, Vt = np.linalg.svd(pts - centroid, full_matrices=False)
+    normal = Vt[2, :]
+
+    # Create correction plane Z(x,y) = ...
+    X, Y = np.meshgrid(np.arange(w), np.arange(h))
+    Z_plane = ((normal[0]*(X - centroid[0]) +
+                normal[1]*(Y - centroid[1])) / normal[2]) + centroid[2]
+
+    # Subtract plane from depth, clip to valid range 
+    corrected = np.where(depth_map > DEPTH_MIN,
+                         depth_map - Z_plane,
+                         depth_map)
+    return np.clip(corrected, DEPTH_MIN, DEPTH_MAX).astype(np.float32)
+
+
+def combined_segmentation(color_img: np.ndarray,
+                          depth_map: np.ndarray) -> np.ndarray:
+    """
+    Combine grayscale histogram-equalized RGB and normalized depth
+    into a single 8-bit image for thresholding.
+    """
+    gray = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+
+    depth_norm = cv2.normalize(depth_map.astype(np.float32),
+                               None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    if USE_COLOR_SEGMENTATION:
+        combined = cv2.addWeighted(gray.astype(np.float32), COLOR_WEIGHT,
+                                   depth_norm.astype(np.float32), DEPTH_WEIGHT, 0)
+        combined = combined.astype(np.uint8)
+    else:
+        combined = depth_norm
+
+    # Adaptive or Otsu/given threshold :contentReference[oaicite:8]{index=8} :contentReference[oaicite:9]{index=9}
+    if ADAPTIVE_THRESH:
+        return cv2.adaptiveThreshold(combined, 255,
+                                     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                     cv2.THRESH_BINARY, 11, 2)
+    else:
+        flag = cv2.THRESH_BINARY
+        if BINARY_THRESH == 0:
+            flag |= cv2.THRESH_OTSU
+        _, binarized = cv2.threshold(combined, BINARY_THRESH, 255, flag)
+        return binarized
+
+
+def analyze_frame(color_img: np.ndarray,
+                  depth_map: np.ndarray,
+                  show_plots: bool = SHOW_PLOTS):
+    """
+    Full pipeline:
+      1) Optional slope correction
+      2) Combined RGB-D segmentation
+      3) Morphology
+      4) Marker computation
+      5) Watershed
+      6) Extract and annotate particles
+    """
+    # Ensure correct dtypes
+    if color_img.dtype != np.uint8 and color_img.max() <= 1.0:
+        color_img = (color_img * 255).astype(np.uint8)
+    if depth_map.dtype != np.float32:
+        depth_map = depth_map.astype(np.float32)
+
+    # 1. Correct scene slope :contentReference[oaicite:10]{index=10}
+    if SLOPE_CORRECTION:
+        depth_map = correct_slope(depth_map)
+
+    # 2. Segmentation mask
+    mask = combined_segmentation(color_img, depth_map)
+
+    # 3. Morphological opening + erosion
     kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
-    opening = cv2.morphologyEx(depth_bin, cv2.MORPH_OPEN, kernel, iterations=MORPH_ITERATIONS)
-    
-    if show_plots:
-        plt.subplot(3, 4, 4)
-        plt.imshow(opening, cmap='gray')
-        plt.title('4. После морфологии')
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel,
+                              iterations=MORPH_ITERATIONS)
+    opened = cv2.erode(opened, np.ones((2, 2), np.uint8), iterations=1)
 
-    # 4. Поиск маркеров
-    dist = cv2.distanceTransform(opening, cv2.DIST_L2, DISTANCE_TRANSFORM_MASK)
-    _, fg = cv2.threshold(dist, FOREGROUND_THRESHOLD_RATIO * dist.max(), 255, 0)
+    # 4. Compute markers via distance transform :contentReference[oaicite:11]{index=11}
+    dist = cv2.distanceTransform(opened, cv2.DIST_L2, DISTANCE_TRANSFORM_MASK)
+    _, fg = cv2.threshold(dist,
+                          FOREGROUND_THRESHOLD_RATIO * dist.max(),
+                          255, 0)
     fg = fg.astype(np.uint8)
-    bg = cv2.dilate(opening, kernel, iterations=DILATE_ITERATIONS)
+    bg = cv2.dilate(opened, kernel, iterations=DILATE_ITERATIONS)
     unknown = cv2.subtract(bg, fg)
-    
-    if show_plots:
-        plt.subplot(3, 4, 5)
-        plt.imshow(dist, cmap='jet')
-        plt.title('5. Distance Transform')
-        
-        plt.subplot(3, 4, 6)
-        plt.imshow(fg, cmap='gray')
-        plt.title('6. Передний план (FG)')
-        
-        plt.subplot(3, 4, 7)
-        plt.imshow(bg, cmap='gray')
-        plt.title('7. Задний план (BG)')
 
-    # 5. Watershed
+    # 5. Watershed on grayscale version :contentReference[oaicite:12]{index=12}
     _, markers = cv2.connectedComponents(fg)
-    markers = markers + 1
+    markers = (markers + 1).astype(np.int32)
     markers[unknown == 255] = 0
-    
-    img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-    markers = cv2.watershed(img_bgr, markers)
-    img_bgr[markers == -1] = BORDER_COLOR  # Границы
-    
-    if show_plots:
-        plt.subplot(3, 4, 8)
-        plt.imshow(markers, cmap='nipy_spectral')
-        plt.title('8. Маркеры для watershed')
-        
-        plt.subplot(3, 4, 9)
-        plt.imshow(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        plt.title('9. Результат watershed')
 
-    # 6. Анализ компонент
-    segmented_mask = (markers > 1).astype(np.uint8)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(segmented_mask)
-    
-    # 7. Расчет диаметров
+    gray3 = cv2.cvtColor(color_img, cv2.COLOR_BGR2GRAY)
+    gray3 = cv2.equalizeHist(gray3)
+    markers = cv2.watershed(cv2.merge([gray3] * 3), markers)
+
+    # 6. Extract stats and annotate :contentReference[oaicite:13]{index=13}
+    segmented = (markers > 1).astype(np.uint8)
+    _, _, stats, _ = cv2.connectedComponentsWithStats(segmented, connectivity=8)
+
+    result = cv2.cvtColor(color_img, cv2.COLOR_BGR2RGB)
     diameters = []
-    for stat in stats[1:]:
+    for stat in stats[1:]:  # skip background
         area = stat[cv2.CC_STAT_AREA]
         diameter = 2 * np.sqrt(area / np.pi)
-        diameters.append(diameter)
-    
-    # Визуализация результатов
-    result_img = img_bgr.copy()
-    for i, stat in enumerate(stats[1:]):
-        x, y, w, h, area = stat[:5]
-        cv2.rectangle(result_img, (x, y), (x+w, y+h), BBOX_COLOR, BBOX_THICKNESS)
-        cv2.putText(result_img, f"{diameters[i]:.1f}", (x, y-5), 
-                   cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, BBOX_COLOR, FONT_THICKNESS)
-    
+        if MIN_PARTICLE_SIZE <= diameter <= MAX_PARTICLE_SIZE:
+            diameters.append(diameter)
+            x, y, w, h = stat[:4]
+            cv2.rectangle(result, (x, y), (x + w, y + h),
+                          BBOX_COLOR, BBOX_THICKNESS)
+            cv2.putText(result, f"{diameter:.1f}px", (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE,
+                        BBOX_COLOR, FONT_THICKNESS)
+
+    # Debug plots
     if show_plots:
-        plt.subplot(3, 4, 10)
-        plt.imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
-        plt.title('10. Результат с размерами')
-        
-        plt.subplot(3, 4, 11)
-        plt.hist(diameters, bins=HIST_BINS)
-        plt.title('11. Распределение диаметров')
-        plt.xlabel('Диаметр (пиксели)')
-        plt.ylabel('Количество')
-        
+        plt.figure(figsize=PLOT_FIGSIZE)
+        plt.subplot(2, 3, 1); plt.title("Depth Corrected")
+        plt.imshow(depth_map, cmap='inferno'); plt.axis('off')
+        plt.subplot(2, 3, 2); plt.title("Combined Mask")
+        plt.imshow(mask, cmap='gray'); plt.axis('off')
+        plt.subplot(2, 3, 3); plt.title("Opened")
+        plt.imshow(opened, cmap='gray'); plt.axis('off')
+        plt.subplot(2, 3, 4); plt.title("Distance")
+        plt.imshow(dist, cmap='jet'); plt.axis('off')
+        plt.subplot(2, 3, 5); plt.title("Markers")
+        plt.imshow(markers, cmap='tab20'); plt.axis('off')
+        plt.subplot(2, 3, 6); plt.title("Result")
+        plt.imshow(result); plt.axis('off')
         plt.tight_layout()
         plt.show()
 
-    return result_img, diameters
+    return result, diameters or "No particles detected"
