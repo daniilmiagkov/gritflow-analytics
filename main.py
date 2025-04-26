@@ -57,13 +57,13 @@ def main():
     print(f"- Depth Shading: frame_{FRAME_NUMBER}_depth_shading.png")
     print(f"- Облако точек: {ply_path}")
 
-    # Анализ кадра
-    segmented_img, diameters = analyze_frame(color_np, depth_np)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, f"segmented_{FRAME_NUMBER}.png"), segmented_img)
+    # # Анализ кадра
+    # segmented_img, diameters = analyze_frame(color_np, depth_np)
+    # cv2.imwrite(os.path.join(OUTPUT_DIR, f"segmented_{FRAME_NUMBER}.png"), segmented_img)
     
-    print(f"\nРезультаты анализа:")
-    print(f"Обнаружено частиц: {len(diameters)}")
-    print(f"Диапазон диаметров: {round(min(diameters), 2)}-{round(max(diameters), 2)} мм")
+    # print(f"\nРезультаты анализа:")
+    # print(f"Обнаружено частиц: {len(diameters)}")
+    # print(f"Диапазон диаметров: {round(min(diameters), 2)}-{round(max(diameters), 2)} мм")
 
     # # Визуализация
     # if input("Показать 3D визуализацию? (y/n): ").lower() == "y":
