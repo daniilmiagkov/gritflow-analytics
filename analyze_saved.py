@@ -73,21 +73,21 @@ def main():
     cv2.imwrite(seg_depth_path, d_res)
     print(f"[Depth] Сегментированное изображение сохранено: {seg_depth_path}")
 
-    # Вывод и графики по цвету
-    if c_diams:
-        print(f"[Color] Обнаружено частиц: {len(c_diams)}")
-        print(f"[Color] Диапазон диаметров: {min(c_diams):.2f}–{max(c_diams):.2f} мм")
-        plot_diameters(c_diams, c_xs, FRAME_NUMBER, title_prefix="Color")
-    else:
-        print("[Color] Частицы не обнаружены.")
+    # # Вывод и графики по цвету
+    # if c_diams:
+    #     print(f"[Color] Обнаружено частиц: {len(c_diams)}")
+    #     print(f"[Color] Диапазон диаметров: {min(c_diams):.2f}–{max(c_diams):.2f} мм")
+    #     plot_diameters(c_diams, c_xs, FRAME_NUMBER, title_prefix="Color")
+    # else:
+    #     print("[Color] Частицы не обнаружены.")
 
-    # Вывод и графики по глубине
-    if d_diams:
-        print(f"[Depth] Обнаружено частиц: {len(d_diams)}")
-        print(f"[Depth] Диапазон диаметров: {min(d_diams):.2f}–{max(d_diams):.2f} мм")
-        # plot_diameters(d_diams, d_xs, FRAME_NUMBER, title_prefix="Depth")
-    else:
-        print("[Depth] Частицы не обнаружены.")
+    # # Вывод и графики по глубине
+    # if d_diams:
+    #     print(f"[Depth] Обнаружено частиц: {len(d_diams)}")
+    #     print(f"[Depth] Диапазон диаметров: {min(d_diams):.2f}–{max(d_diams):.2f} мм")
+    #     # plot_diameters(d_diams, d_xs, FRAME_NUMBER, title_prefix="Depth")
+    # else:
+    #     print("[Depth] Частицы не обнаружены.")
 
 if __name__ == "__main__":
     main()
