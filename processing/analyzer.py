@@ -43,6 +43,7 @@ def analyze_mask(img: np.ndarray, mask: np.ndarray,
 def segment_color(img: np.ndarray, cfg: ColorConfig) -> dict:
     steps = {"original": img.copy()}
 
+    # === Grayscale и контраст ===
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     steps["gray"] = gray.copy()
 
@@ -50,32 +51,48 @@ def segment_color(img: np.ndarray, cfg: ColorConfig) -> dict:
     clahe_gray = clahe.apply(gray)
     steps["clahe_gray"] = clahe_gray.copy()
 
+    # === Шумоподавление ===
     median = cv2.medianBlur(clahe_gray, cfg.median_blur_size) if cfg.median_blur_size > 1 else clahe_gray.copy()
     steps["median_blur"] = median.copy()
 
+    # === Пороговая бинаризация ===
     if cfg.adaptive_thresh:
         binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            median, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, cfg.adaptive_block_size, cfg.adaptive_C
         )
     else:
         flag = cv2.THRESH_BINARY
         if cfg.use_otsu and cfg.binary_thresh == 0:
             flag |= cv2.THRESH_OTSU
-        _, binary = cv2.threshold(gray, cfg.binary_thresh, 255, flag)
+        _, binary = cv2.threshold(median, cfg.binary_thresh, 255, flag)
     steps["binary_mask"] = binary.copy()
 
-    # === Дополнительная логика с distance transform ===
-    dist_transform = cv2.distanceTransform(binary, cv2.DIST_L2, cfg.distance_transform_mask)
+    # === Морфологическая фильтрация до distance transform ===
+    shape_map = {
+        "rect": cv2.MORPH_RECT,
+        "ellipse": cv2.MORPH_ELLIPSE,
+        "cross": cv2.MORPH_CROSS
+    }
+    kernel_shape = shape_map.get(cfg.morph_kernel_shape, cv2.MORPH_RECT)
+    ker = cv2.getStructuringElement(kernel_shape, (cfg.morph_kernel_size, cfg.morph_kernel_size))
+    
+    # Открытие — удаляет мелкие шумы
+    morph_opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, ker, iterations=cfg.morph_iterations)
+    steps["morph_opened"] = morph_opened.copy()
+
+    # Закрытие — соединяет разорванные объекты
+    morph_closed = cv2.morphologyEx(morph_opened, cv2.MORPH_CLOSE, ker, iterations=cfg.dilate_iterations)
+    steps["morph_closed"] = morph_closed.copy()
+
+    # === Distance Transform по очищенной маске ===
+    dist_transform = cv2.distanceTransform(morph_closed, cv2.DIST_L2, cfg.distance_transform_mask)
     steps["distance_transform"] = dist_transform.copy()
 
+    # === Отделение переднего плана ===
     dt_norm = cv2.normalize(dist_transform, None, 0, 1.0, cv2.NORM_MINMAX)
     foreground = (dt_norm > cfg.foreground_threshold_ratio).astype(np.uint8) * 255
     steps["foreground_mask"] = foreground.copy()
-
-    kernel = np.ones((3, 3), np.uint8)
-    dilated = cv2.dilate(foreground, kernel, iterations=cfg.dilate_iterations)
-    steps["dilated_foreground"] = dilated.copy()
 
     return steps
 
@@ -110,28 +127,10 @@ def analyze_frame(color_img: np.ndarray,
     color_steps["result"] = cres.copy()
 
     if v_cfg.show_plots and save_plots:
-        # === Первая фигура (8 шагов) ===
-        fig1 = plt.figure(figsize=(v_cfg.plot_figsize[0] * 2,
-                                   v_cfg.plot_figsize[1] * 4))
-        for i in range(9):
-            plt.subplot(9, 1, i + 1)
-            title, img = list(color_steps.items())[i]
-            plt.title(f"COLOR: {title}", fontsize=20)
-            cmap = 'gray' if img.ndim == 2 else None
-            plt.imshow(img, cmap=cmap)
-            plt.axis('off')
-        plt.tight_layout()
-
-        if output_dir and label:
-            fig1_path = os.path.join(output_dir, f"color_steps_{label.lower()}_1.png")
-            fig1.savefig(fig1_path)
-            print(f"[{label}] Сохранён график шагов (1): {fig1_path}")
-        plt.close(fig1)
-
-        # === Вторая фигура (финальный результат) ===
-        fig2 = plt.figure(figsize=(v_cfg.plot_figsize[0] * 2.5,
-                                   v_cfg.plot_figsize[1] * 1.5))
-        last_title, last_img = list(color_steps.items())[9]
+        # === Первая фигура — итоговый результат отдельно ===
+        fig1 = plt.figure(figsize=(v_cfg.plot_figsize[0] * 2.5,
+                                    v_cfg.plot_figsize[1] * 1.5))
+        last_title, last_img = list(color_steps.items())[-1]
         plt.title(f"COLOR: {last_title}", fontsize=12)
         cmap = 'gray' if last_img.ndim == 2 else None
         plt.imshow(last_img, cmap=cmap)
@@ -139,9 +138,28 @@ def analyze_frame(color_img: np.ndarray,
         plt.tight_layout()
 
         if output_dir and label:
-            fig2_path = os.path.join(output_dir, f"color_steps_{label.lower()}_2.png")
-            fig2.savefig(fig2_path)
-            print(f"[{label}] Сохранён график шагов (2): {fig2_path}")
-        plt.close(fig2)
+            fig1_path = os.path.join(output_dir, f"color_steps_{label.lower()}_1_result.png")
+            fig1.savefig(fig1_path)
+            print(f"[{label}] Сохранён график результата: {fig1_path}")
+        plt.close(fig1)
 
-    return cres, cdi, cxs
+        # === Вторая фигура — все промежуточные шаги ===
+        intermediate_items = list(color_steps.items())[:-1]
+        num_steps = len(intermediate_items)
+
+        fig2 = plt.figure(figsize=(v_cfg.plot_figsize[0] * 2,
+                                    v_cfg.plot_figsize[1] * num_steps))
+
+        for i, (title, img) in enumerate(intermediate_items):
+            plt.subplot(num_steps, 1, i + 1)
+            plt.title(f"COLOR: {title}", fontsize=14)
+            cmap = 'gray' if img.ndim == 2 else None
+            plt.imshow(img, cmap=cmap)
+            plt.axis('off')
+        plt.tight_layout()
+
+        if output_dir and label:
+            fig2_path = os.path.join(output_dir, f"color_steps_{label.lower()}_2_steps.png")
+            fig2.savefig(fig2_path)
+            print(f"[{label}] Сохранён график шагов: {fig2_path}")
+        plt.close(fig2)
