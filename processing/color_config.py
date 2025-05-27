@@ -22,6 +22,13 @@ class ColorConfig:
     distance_transform_mask: int = 3
     foreground_threshold_ratio: float = 0.2
     dilate_iterations: int = 1
+    invert: bool = False
+    equalize_hist: bool = False 
+    use_clahe: bool = False
+    clahe_clip_limit: float = 2.0
+    clahe_tile_grid: Tuple[int, int] = (8, 8)
+
+
 # from dataclasses import dataclass
 # from typing import Tuple
 

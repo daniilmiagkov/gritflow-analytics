@@ -1,165 +1,219 @@
-from dataclasses import dataclass
 import os
-from typing import Tuple, List
-
+from typing import Tuple, List, Dict, Any
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import tifffile
 
 from processing.color_config import ColorConfig
+from processing.depth_config import DepthConfig
 from processing.visual_config import VisualizationConfig
 
+# -----------------------------------------------------------------------------
+# 1. Общий пайплайн сегментации одноканального изображения
+# -----------------------------------------------------------------------------
+def segment_gray(
+    gray: np.ndarray,
+    cfg: Any  # может быть ColorConfig или DepthConfig, у них одинаковые поля
+) -> Dict[str, np.ndarray]:
+    steps: Dict[str, np.ndarray] = {"original_gray": gray.copy()}
 
-def analyze_mask(img: np.ndarray, mask: np.ndarray,
-                 cfg: ColorConfig) -> Tuple[np.ndarray, List[float], List[float]]:
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    res = img.copy()
-    diagonals, xs = [], []
+ # 1) шумоподавление
+    if cfg.median_blur_size > 1:
+        m = cv2.medianBlur(gray, cfg.median_blur_size)
+    else:
+        m = gray.copy()
+    steps["median_blur"] = m
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        # if area < cfg.min_contour_area:
-        #     continue
+    # 2) инверсия (по желанию)
+    if cfg.invert: 
+        m = cv2.bitwise_not(m)
+    steps["inverted"] = m.copy()
 
-        rect = cv2.minAreaRect(cnt)
-        (cx, cy), (w, h), angle = rect
-        diag = np.sqrt(w ** 2 + h ** 2)
+    # 3) CLAHE
+    if getattr(cfg, "use_clahe", False):  # безопасно на случай отсутствия поля
+        clahe = cv2.createCLAHE(clipLimit=cfg.clahe_clip_limit, tileGridSize=cfg.clahe_tile_grid)
+        m = clahe.apply(m)
+        steps["clahe"] = m.copy()
 
-        if not (cfg.min_particle_size <= diag <= cfg.max_particle_size):
-            continue
+    # 4) equalizeHist
+    if cfg.equalize_hist:
+        m = cv2.equalizeHist(m)
+        steps["equalized"] = m.copy()
 
-        box = cv2.boxPoints(rect)
-        box = np.int0(box)
-        diagonals.append(diag)
-        xs.append(cx)
-
-        cv2.drawContours(res, [box], 0, cfg.bbox_color, cfg.bbox_thickness)
-        # cv2.putText(res, f"{diag:.1f}", (int(cx), int(cy)),
-        #             cv2.FONT_HERSHEY_SIMPLEX, cfg.font_scale, cfg.bbox_color, cfg.font_thickness)
-
-    return res, diagonals, xs
-
-
-def segment_color(img: np.ndarray, cfg: ColorConfig) -> dict:
-    steps = {"original": img.copy()}
-
-    # === Grayscale и контраст ===
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    steps["gray"] = gray.copy()
-
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    clahe_gray = clahe.apply(gray)
-    steps["clahe_gray"] = clahe_gray.copy()
-
-    # === Шумоподавление ===
-    median = cv2.medianBlur(clahe_gray, cfg.median_blur_size) if cfg.median_blur_size > 1 else clahe_gray.copy()
-    steps["median_blur"] = median.copy()
-
-    # === Пороговая бинаризация ===
+    # 2) бинаризация
     if cfg.adaptive_thresh:
-        binary = cv2.adaptiveThreshold(
-            median, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, cfg.adaptive_block_size, cfg.adaptive_C
+        b = cv2.adaptiveThreshold(
+            m, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY if isinstance(cfg, ColorConfig) else cv2.THRESH_BINARY_INV,
+            cfg.adaptive_block_size, cfg.adaptive_C
         )
     else:
-        flag = cv2.THRESH_BINARY
+        flag = cv2.THRESH_BINARY_INV if isinstance(cfg, DepthConfig) else cv2.THRESH_BINARY
         if cfg.use_otsu and cfg.binary_thresh == 0:
             flag |= cv2.THRESH_OTSU
-        _, binary = cv2.threshold(median, cfg.binary_thresh, 255, flag)
-    steps["binary_mask"] = binary.copy()
-
-    # === Морфологическая фильтрация до distance transform ===
+        _, b = cv2.threshold(m, cfg.binary_thresh, 255, flag)
+    steps["binary_mask"] = b
+ # 3) морфология (open → close → dilate)
     shape_map = {
         "rect": cv2.MORPH_RECT,
         "ellipse": cv2.MORPH_ELLIPSE,
         "cross": cv2.MORPH_CROSS
     }
-    kernel_shape = shape_map.get(cfg.morph_kernel_shape, cv2.MORPH_RECT)
-    ker = cv2.getStructuringElement(kernel_shape, (cfg.morph_kernel_size, cfg.morph_kernel_size))
-    
-    # Открытие — удаляет мелкие шумы
-    morph_opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, ker, iterations=cfg.morph_iterations)
-    steps["morph_opened"] = morph_opened.copy()
+    kern = cv2.getStructuringElement(
+        shape_map.get(cfg.morph_kernel_shape, cv2.MORPH_RECT),
+        (cfg.morph_kernel_size, cfg.morph_kernel_size)
+    )
+    opened = cv2.morphologyEx(b, cv2.MORPH_OPEN, kern, iterations=cfg.morph_iterations)
+    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kern, iterations=cfg.dilate_iterations)
+    dilated = cv2.dilate(closed, kern, iterations=cfg.dilate_iterations)
 
-    # Закрытие — соединяет разорванные объекты
-    morph_closed = cv2.morphologyEx(morph_opened, cv2.MORPH_CLOSE, ker, iterations=cfg.dilate_iterations)
-    steps["morph_closed"] = morph_closed.copy()
+    steps["morph_opened"] = opened
+    steps["morph_closed"] = closed
+    steps["morph_dilated"] = dilated
 
-    # === Distance Transform по очищенной маске ===
-    dist_transform = cv2.distanceTransform(morph_closed, cv2.DIST_L2, cfg.distance_transform_mask)
-    steps["distance_transform"] = dist_transform.copy()
-
-    # === Отделение переднего плана ===
-    dt_norm = cv2.normalize(dist_transform, None, 0, 1.0, cv2.NORM_MINMAX)
-    foreground = (dt_norm > cfg.foreground_threshold_ratio).astype(np.uint8) * 255
-    steps["foreground_mask"] = foreground.copy()
+    # 4) distance transform + foreground mask
+    dt = cv2.distanceTransform(dilated, cv2.DIST_L2, cfg.distance_transform_mask)
+    steps["distance_transform"] = dt
+    dtn = cv2.normalize(dt, None, 0, 1.0, cv2.NORM_MINMAX)
+    fg = (dtn > cfg.foreground_threshold_ratio).astype(np.uint8) * 255
+    steps["foreground_mask"] = fg
 
     return steps
 
+# -----------------------------------------------------------------------------
+# 2. Общий анализ контуров
+# -----------------------------------------------------------------------------
+def analyze_gray(
+    img_for_draw: np.ndarray,
+    mask: np.ndarray,
+    cfg: Any
+) -> Tuple[np.ndarray, List[float], List[float]]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = img_for_draw.copy()
+    diams: List[float] = []
+    xs:   List[float] = []
 
-def process_mask(mask: np.ndarray, cfg: ColorConfig) -> np.ndarray:
-    shape_map = {
-        "rect": cv2.MORPH_RECT,
-        "ellipse": cv2.MORPH_ELLIPSE,
-        "cross": cv2.MORPH_CROSS
-    }
-    kernel_shape = shape_map.get(cfg.morph_kernel_shape, cv2.MORPH_RECT)
-    ker = cv2.getStructuringElement(kernel_shape, (cfg.morph_kernel_size, cfg.morph_kernel_size))
-    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=cfg.morph_iterations)
-    eroded = cv2.erode(opened, np.ones((2, 2), np.uint8), iterations=1)
-    return eroded
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < getattr(cfg, "min_contour_area", 0):
+            continue
 
+        rect = cv2.minAreaRect(cnt)
+        (cx, cy), (w, h), _ = rect
+        d = float(np.hypot(w, h))
+        if not (cfg.min_particle_size <= d <= cfg.max_particle_size):
+            continue
 
-def analyze_frame(color_img: np.ndarray,
-                  c_cfg: ColorConfig,
-                  v_cfg: VisualizationConfig,
-                  label: str = "",
-                  output_dir: str = "",
-                  save_plots: bool = True):
-    ...
-    if color_img.dtype != np.uint8 and color_img.max() <= 1.0:
-        color_img = (color_img * 255).astype(np.uint8)
+        box = cv2.boxPoints(rect).astype(np.int32)
+        diams.append(d)
+        xs.append(cx)
+        # отрисуем
+        cv2.drawContours(out, [box], 0, cfg.bbox_color, cfg.bbox_thickness)
+        cv2.putText(out, f"{d:.1f}", (int(cx), int(cy)),
+                    cv2.FONT_HERSHEY_SIMPLEX, cfg.font_scale, cfg.bbox_color, cfg.font_thickness)
+    return out, diams, xs
 
-    color_steps = segment_color(color_img, c_cfg)
-    morphed_mask = process_mask(color_steps["dilated_foreground"], c_cfg)
-    color_steps["morphed_mask"] = morphed_mask.copy()
-    cres, cdi, cxs = analyze_mask(color_img, morphed_mask, c_cfg)
-    color_steps["result"] = cres.copy()
+# -----------------------------------------------------------------------------
+# 3a. Анализ цветного кадра
+# -----------------------------------------------------------------------------
+def analyze_color_frame(
+    color_img: np.ndarray,
+    cfg: ColorConfig,
+    v_cfg: VisualizationConfig,
+    label: str = "",
+    output_dir: str = "",
+    save_plots: bool = False
+) -> Tuple[np.ndarray, List[float], List[float]]:
+    # нормализация типов
+    img = (color_img*255).astype(np.uint8) if color_img.dtype != np.uint8 else color_img
+    # в серый
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    steps = segment_gray(gray, cfg)
+    steps["binary_mask_color"] = steps["binary_mask"]  # читаемая ветка
 
-    if v_cfg.show_plots and save_plots:
-        # === Первая фигура — итоговый результат отдельно ===
-        fig1 = plt.figure(figsize=(v_cfg.plot_figsize[0] * 2.5,
-                                    v_cfg.plot_figsize[1] * 1.5))
-        last_title, last_img = list(color_steps.items())[-1]
-        plt.title(f"COLOR: {last_title}", fontsize=12)
-        cmap = 'gray' if last_img.ndim == 2 else None
-        plt.imshow(last_img, cmap=cmap)
-        plt.axis('off')
-        plt.tight_layout()
+    # финальная маска
+    final_mask = steps["foreground_mask"]
+    # анализ контуров
+    res, diams, xs = analyze_gray(img, final_mask, cfg)
+    steps["result"] = res
 
-        if output_dir and label:
-            fig1_path = os.path.join(output_dir, f"color_steps_{label.lower()}_1_result.png")
-            fig1.savefig(fig1_path)
-            print(f"[{label}] Сохранён график результата: {fig1_path}")
-        plt.close(fig1)
+    if save_plots:
+        _save_plots(steps, "color", label, output_dir, v_cfg.plot_figsize)
+    return res, diams, xs
 
-        # === Вторая фигура — все промежуточные шаги ===
-        intermediate_items = list(color_steps.items())[:-1]
-        num_steps = len(intermediate_items)
+# -----------------------------------------------------------------------------
+# 3b. Анализ depth‐кадра
+# -----------------------------------------------------------------------------
+def analyze_depth_frame(
+    depth_img: np.ndarray,
+    cfg: DepthConfig,
+    v_cfg: VisualizationConfig,
+    label: str = "",
+    output_dir: str = "",
+    save_plots: bool = False
+) -> Tuple[np.ndarray, List[float], List[float]]:
+    # нормализация
+    norm = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    steps = segment_gray(norm, cfg)
 
-        fig2 = plt.figure(figsize=(v_cfg.plot_figsize[0] * 2,
-                                    v_cfg.plot_figsize[1] * num_steps))
+    # для отрисовки сконвертим в BGR
+    vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
+    res, diams, xs = analyze_gray(vis, steps["foreground_mask"], cfg)
+    steps["result"] = res
 
-        for i, (title, img) in enumerate(intermediate_items):
-            plt.subplot(num_steps, 1, i + 1)
-            plt.title(f"COLOR: {title}", fontsize=14)
-            cmap = 'gray' if img.ndim == 2 else None
-            plt.imshow(img, cmap=cmap)
-            plt.axis('off')
-        plt.tight_layout()
+    if save_plots:
+        _save_plots(steps, "depth", label, output_dir, v_cfg.plot_figsize)
+    return res, diams, xs
 
-        if output_dir and label:
-            fig2_path = os.path.join(output_dir, f"color_steps_{label.lower()}_2_steps.png")
-            fig2.savefig(fig2_path)
-            print(f"[{label}] Сохранён график шагов: {fig2_path}")
-        plt.close(fig2)
+# -----------------------------------------------------------------------------
+# Вспомогалка для сохранения промежуточных изображений
+# -----------------------------------------------------------------------------
+def _save_plots(
+    steps: Dict[str, np.ndarray],
+    mode: str,
+    label: str,
+    output_dir: str,
+    figsize: Tuple[float, float]
+):
+    # финальный шаг в отдельном файле
+    last_title, last_img = list(steps.items())[-1]
+    fig = plt.figure(figsize=(figsize[0]*2.5, figsize[1]*1.5))
+    plt.title(f"{mode.upper()}[{label}] {last_title}")
+    plt.imshow(last_img, cmap='gray' if last_img.ndim==2 else None)
+    plt.axis('off')
+    path = os.path.join(output_dir, f"{mode}_{label}_result.png")
+    fig.savefig(path); plt.close(fig)
+
+    # все промежуточные
+    items = list(steps.items())[:-1]
+    n = len(items)
+    fig = plt.figure(figsize=(figsize[0]*2, figsize[1]*n))
+    for i,(t, im) in enumerate(items):
+        ax = fig.add_subplot(n,1,i+1)
+        ax.set_title(f"{mode.upper()}[{label}] {t}")
+        ax.imshow(im, cmap='gray' if im.ndim==2 else None)
+        ax.axis('off')
+    path = os.path.join(output_dir, f"{mode}_{label}_steps.png")
+    fig.savefig(path); plt.close(fig)
+
+# -----------------------------------------------------------------------------
+# Пример использования в main()
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    from config import OUTPUT_DIR, FRAME_NUMBER
+
+    color_cfg = ColorConfig()
+    depth_cfg = ColorConfig()
+    vis_cfg   = VisualizationConfig(show_plots=True)
+
+    # цвет
+    img = cv2.imread(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_color.png"))
+    c_res, c_diams, c_xs = analyze_color_frame(img, color_cfg, vis_cfg,
+                                               label="C1", output_dir=OUTPUT_DIR, save_plots=True)
+
+    # глубина
+    depth = tifffile.imread(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_depth.tiff"))
+    d_res, d_diams, d_xs = analyze_depth_frame(depth, depth_cfg, vis_cfg,
+                                               label="D1", output_dir=OUTPUT_DIR, save_plots=True)
