@@ -5,9 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from processing.analyzer import analyze_depth_frame, analyze_color_frame
-from processing.color_config import Config
+from processing.config import Config
 from processing.visual_config import VisualizationConfig
-from config import OUTPUT_DIR, FRAME_NUMBER
+from config import OUTPUT_DIR, FRAME_NUMBER, SVO_PATH
+from zed.zed_loader import get_intrinsics_from_svo
 
 def load_saved_depth(frame_number: int) -> np.ndarray:
     """Загружает сохранённую карту глубины (TIFF, float32)."""
@@ -87,14 +88,14 @@ def main():
             dilate_iterations=0,
 
             # === Детекция контуров ===
-            min_particle_size=5,
-            max_particle_size=60,
+            min_particle_size=40,
+            max_particle_size=200,
 
             # === Аннотации (Bounding Boxes) ===
             bbox_color=(0, 255, 0),
             bbox_thickness=1,
             font_scale=0.5,
-            font_thickness=1,
+            font_thickness=0,
 
             # === Постобработка и выделение переднего плана ===
             distance_transform_mask=5,
@@ -106,34 +107,44 @@ def main():
     ]
 
     vis_cfg = VisualizationConfig(show_plots=True)
+    fx, fy, *_ = get_intrinsics_from_svo(SVO_PATH)
 
-    # === Анализ глубины ===
     for label, cfg in depth_configs:
-        print(f"\n=== Анализ Depth: {label} ===")
-        seg, diams, xs = analyze_depth_frame(
-            depth_np, cfg, vis_cfg,
-            label=label, output_dir=OUTPUT_DIR, save_plots=True
-        )
-        out_path = os.path.join(OUTPUT_DIR, f"depth_seg_{label.lower()}_{FRAME_NUMBER}.png")
-        cv2.imwrite(out_path, seg)
-        print(f"[{label}] Сохранено сегментированное (depth): {out_path}")
-        if diams:
-            print(f"[{label}] Найдено объектов: {len(diams)}  Диаметры: {min(diams):.1f}–{max(diams):.1f}")
-            plot_diameters(diams, xs, FRAME_NUMBER, label)
+            print(f"\n=== Анализ Depth: {label} ===")
+            seg, diams_px, diams_mm, xs= analyze_depth_frame(
+                depth_np, cfg, vis_cfg,
+                label=label,
+                output_dir=OUTPUT_DIR,
+                save_plots=True,
+                fx=fx, fy=fy
+            )
 
+            out_path = os.path.join(OUTPUT_DIR, f"depth_seg_{label.lower()}_{FRAME_NUMBER}.png")
+            cv2.imwrite(out_path, seg)
+            print(f"[{label}] Сохранено сегментированное (depth): {out_path}")
+            if diams_mm:
+                print(f"[{label}] Найдено объектов: {len(diams_mm)}  Диаметры: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
+                plot_diameters(diams_mm, xs, FRAME_NUMBER, label)
+            else:
+                print(f"[{label}] Объекты не найдены.")
     # === Анализ цвета ===
     for label, cfg in color_configs:
         print(f"\n=== Анализ Color: {label} ===")
-        seg, diams, xs = analyze_color_frame(
+        seg, diams_px, diams_mm, xs = analyze_color_frame(
             color_np, cfg, vis_cfg,
-            label=label, output_dir=OUTPUT_DIR, save_plots=True
+            label=label,
+            output_dir=OUTPUT_DIR,
+            save_plots=True,
+            depth_img=depth_np,
+            fx=fx,
+            fy=fy,
         )
         out_path = os.path.join(OUTPUT_DIR, f"color_seg_{label.lower()}_{FRAME_NUMBER}.png")
         cv2.imwrite(out_path, seg)
         print(f"[{label}] Сохранено сегментированное (color): {out_path}")
-        if diams:
-            print(f"[{label}] Найдено объектов: {len(diams)}  Диаметры: {min(diams):.1f}–{max(diams):.1f}")
-            plot_diameters(diams, xs, FRAME_NUMBER, label)
+        if diams_mm:
+            print(f"[{label}] Найдено объектов: {len(diams_mm)}  Диаметры: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
+            plot_diameters(diams_mm, xs, FRAME_NUMBER, label)
 
 if __name__ == "__main__":
     main()

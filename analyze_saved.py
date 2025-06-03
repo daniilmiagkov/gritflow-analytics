@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from processing.analyzer import analyze_frame
-from processing.color_config import Config
+from processing.config import Config
 from processing.visual_config import VisualizationConfig
 from config import OUTPUT_DIR, FRAME_NUMBER  # предполагается, что они у тебя есть
 

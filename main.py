@@ -1,20 +1,76 @@
-from zed.zed_loader import init_camera, grab_frame
-from processing.image_io import save_point_cloud
-from processing.analyzer import analyze_depth_frame
-from visualization.viewer import visualize_ply
-from config import (
-    SVO_PATH, OUTPUT_DIR, FRAME_NUMBER,
-    CROP, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT,
-)
-from processing.color_config import Config
-from processing.visual_config import VisualizationConfig
-
 import os
 import cv2
 import tifffile
 import numpy as np
 
+from zed.zed_loader import get_intrinsics_from_svo, init_camera, grab_frame
+from processing.image_io import save_point_cloud
+from processing.analyzer import analyze_color_frame, analyze_depth_frame
+from visualization.viewer import visualize_ply
+
+from config import (
+    SVO_PATH,
+    OUTPUT_DIR,
+    FRAME_NUMBER,  # стартовый кадр
+    CROP, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT,
+)
+from processing.config import Config
+from processing.visual_config import VisualizationConfig
+
+# -----------------------------------------
+# Задаём, сколько кадров подряд обрабатываем
+NUM_FRAMES = 20
+# -----------------------------------------
+
+# --- Конфигурации для глубинного анализа (пример) ---
+depth_configs = [
+    ("Depth-Big", Config(
+        median_blur_size=3,
+        adaptive_thresh=True,
+        adaptive_block_size=101,
+        adaptive_C=-15,
+        morph_kernel_size=13,
+        morph_iterations=1,
+        dilate_iterations=2,
+        min_particle_size=20,
+        max_particle_size=200,
+        distance_transform_mask=0,
+        foreground_threshold_ratio=0.50,
+        invert=True,
+        equalize_hist=False,
+        use_clahe=True,
+    ))
+]
+
+# --- Конфигурации для цветового анализа (пример) ---
+color_configs = [
+    ("Small", Config(
+        adaptive_thresh=True,
+        adaptive_block_size=13,
+        adaptive_C=-7,
+        median_blur_size=5,
+        morph_kernel_shape='rect',
+        morph_kernel_size=3,
+        morph_iterations=1,
+        dilate_iterations=0,
+        min_particle_size=10,
+        max_particle_size=20,
+        bbox_color=(0, 255, 0),
+        bbox_thickness=1,
+        font_scale=0.5,
+        font_thickness=0,
+        distance_transform_mask=5,
+        foreground_threshold_ratio=0.1,
+        use_clahe=True,
+        equalize_hist=True,
+    )),
+]
+
 def apply_crop(image, x, y, width, height):
+    """
+    Обрезает входное изображение по прямоугольнику (x, y, width, height).
+    Возвращает (обрезанное_изображение, (новые_x, новые_y, new_width, new_height)).
+    """
     h, w = image.shape[:2]
     x1 = max(0, x)
     y1 = max(0, y)
@@ -23,71 +79,125 @@ def apply_crop(image, x, y, width, height):
     return image[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1)
 
 def main():
+    # 1) Убеждаемся, что директория OUTPUT_DIR существует
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"[INFO] Результаты будут сохранены в: {OUTPUT_DIR}")
+
+    # 2) Инициализируем ZED-камера (SVO) один раз
+    print(f"[INFO] Инициализация камеры по пути: {SVO_PATH}")
     zed = init_camera(SVO_PATH)
-    image, depth, depth_shading, point_cloud = grab_frame(zed, FRAME_NUMBER)
 
-    if image is None or depth is None:
-        print(f"Не удалось захватить кадр {FRAME_NUMBER}")
-        return
-
-    color_np = image.get_data()
-    depth_np = depth.get_data().astype(np.float32)
-    depth_shading_np = depth_shading.get_data()
-
-    crop_params = None
-    if CROP:
-        color_np, crop_params = apply_crop(color_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
-        depth_np, _ = apply_crop(depth_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
-        depth_shading_np, _ = apply_crop(depth_shading_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
-        print(f"Область обрезки: x={crop_params[0]}, y={crop_params[1]}, width={crop_params[2]}, height={crop_params[3]}")
-
-    cv2.imwrite(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_color.png"), color_np)
-    tifffile.imwrite(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_depth.tiff"), depth_np)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_depth_shading.png"), depth_shading_np)
-
-    ply_path = os.path.join(OUTPUT_DIR, f"point_cloud_{FRAME_NUMBER}.ply")
-    save_point_cloud(point_cloud, ply_path)
-
-    print(f"\nСохранено:")
-    print(f"- Цвет: frame_{FRAME_NUMBER}_color.png")
-    print(f"- Глубина: frame_{FRAME_NUMBER}_depth.tiff")
-    print(f"- Depth Shading: frame_{FRAME_NUMBER}_depth_shading.png")
-    print(f"- Облако точек: {ply_path}")
-
-    print("\nЗапуск анализа карты глубины...")
-
-    depth_cfg = Config(
-        median_blur_size=3,
-        adaptive_thresh=False,
-        adaptive_block_size=11,
-        adaptive_C=2,
-        binary_thresh=40,
-        use_otsu=True
-    )
-
+    # 3) Получаем параметры камеры (fx, fy и пр.) один раз
+    fx, fy, *_ = get_intrinsics_from_svo(SVO_PATH)
     vis_cfg = VisualizationConfig(
         show_plots=True,
-        plot_figsize=(8, 4)
+        plot_figsize=(8, 4),
     )
 
-    segmented, diameters, positions = analyze_depth_frame(
-        depth_np, depth_cfg, vis_cfg,
-        label=f"{FRAME_NUMBER}", output_dir=OUTPUT_DIR
-    )
+    # Папка для необработанных кадров
+    raw_dir = os.path.join(OUTPUT_DIR, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
 
-    cv2.imwrite(os.path.join(OUTPUT_DIR, f"segmented_{FRAME_NUMBER}_depth.png"), segmented)
+    # Папки под каждый depth config
+    depth_dirs = {}
+    for label, _ in depth_configs:
+        d = os.path.join(OUTPUT_DIR, f"depth_{label.lower()}")
+        os.makedirs(d, exist_ok=True)
+        depth_dirs[label] = d
 
-    print(f"\nРезультаты анализа по глубине:")
-    print(f"Объектов: {len(diameters)}")
-    if diameters:
-        print(f"Диаметры: {round(min(diameters), 2)} – {round(max(diameters), 2)} мм")
-    else:
-        print("Объекты не найдены.")
+    # Папки под каждый color config
+    color_dirs = {}
+    for label, _ in color_configs:
+        d = os.path.join(OUTPUT_DIR, f"color_{label.lower()}")
+        os.makedirs(d, exist_ok=True)
+        color_dirs[label] = d
 
-    if input("Показать 3D визуализацию? (y/n): ").lower() == "y":
-        visualize_ply(ply_path)
+    for i in range(NUM_FRAMES):
+        current_frame = FRAME_NUMBER + i
+        print(f"\n========== Обработка кадра #{current_frame} ==========")
 
+        image, depth, depth_shading, point_cloud = grab_frame(zed, current_frame)
+        if image is None or depth is None:
+            print(f"[ОШИБКА] Кадр {current_frame} не получен. Пропуск.")
+            continue
+
+        color_np = image.get_data()
+        depth_np = depth.get_data().astype(np.float32)
+        depth_shading_np = depth_shading.get_data()
+
+        crop_params = None
+        if CROP:
+            color_np, crop_params = apply_crop(color_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
+            depth_np, _ = apply_crop(depth_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
+            depth_shading_np, _ = apply_crop(depth_shading_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
+            print(f"[INFO] Обрезка кадра: x={crop_params[0]}, y={crop_params[1]}, "
+                  f"width={crop_params[2]}, height={crop_params[3]}")
+
+        # --- Сохраняем исходники в raw ---
+        # color_path = os.path.join(raw_dir, f"color_frame_{current_frame}.png")
+        depth_path = os.path.join(raw_dir, f"depth_frame_{current_frame}.tiff")
+        # # shading_path = os.path.join(raw_dir, f"depth_shading_frame_{current_frame}.png")
+        # # ply_path = os.path.join(raw_dir, f"point_cloud_{current_frame}.ply")
+
+        # cv2.imwrite(color_path, color_np)
+        # tifffile.imwrite(depth_path, depth_np)
+        cv2.imwrite(depth_path, depth_np)
+
+        # # cv2.imwrite(shading_path, depth_shading_np)
+        # # save_point_cloud(point_cloud, ply_path)
+
+        # print(f"[INFO] Сохранены raw-данные кадра {current_frame} в {raw_dir}")
+
+        # --- Анализ Depth ---
+        for label, cfg in depth_configs:
+            subdir = depth_dirs[label]
+            print(f"\n--- Анализ Depth: {label} ---")
+
+            seg, diams_px, diams_mm, xs = analyze_depth_frame(
+                depth_np, cfg, vis_cfg,
+                label=label,
+                output_dir=subdir,
+                save_plots=True,
+                fx=fx, fy=fy
+            )
+
+            seg_filename = f"depth_seg_{label.lower()}_frame_{current_frame}.png"
+            seg_path = os.path.join(subdir, seg_filename)
+            cv2.imwrite(seg_path, seg)
+            print(f"[{label}] Сегментация сохранена: {seg_path}")
+
+            if diams_mm:
+                print(f"[{label}] Объектов: {len(diams_mm)} | Диапазон: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
+            else:
+                print(f"[{label}] Нет объектов.")
+
+        # --- Анализ Color ---
+        for label, cfg in color_configs:
+            subdir = color_dirs[label]
+            print(f"\n--- Анализ Color: {label} ---")
+
+            seg, diams_px, diams_mm, xs = analyze_color_frame(
+                color_np, cfg, vis_cfg,
+                label=label,
+                output_dir=subdir,
+                save_plots=True,
+                depth_img=depth_np,
+                fx=fx, fy=fy
+            )
+
+            seg_filename = f"color_seg_{label.lower()}_frame_{current_frame}.png"
+            seg_path = os.path.join(subdir, seg_filename)
+            cv2.imwrite(seg_path, seg)
+            print(f"[{label}] Сегментация сохранена: {seg_path}")
+
+            if diams_mm:
+                print(f"[{label}] Объектов: {len(diams_mm)} | Диапазон: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
+            else:
+                print(f"[{label}] Нет объектов.")
+
+    # 6) После обработки всех кадров закрываем камеру
     zed.close()
+    print("\n[INFO] Обработка последовательности завершена.")
 
 if __name__ == "__main__":
     main()

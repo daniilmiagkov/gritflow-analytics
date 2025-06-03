@@ -8,7 +8,7 @@ OUTPUT_DIR = r"C:\files\study\suai\diploma\data\output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Кадр
-FRAME_NUMBER = 1874
+FRAME_NUMBER = 1870
 
 
 # config.py

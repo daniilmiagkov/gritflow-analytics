@@ -40,3 +40,29 @@ def grab_frame(zed, frame_number):
     zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
 
     return left_image, depth_measure, depth_shading, point_cloud
+
+def get_intrinsics_from_svo(svo_path: str):
+    init = sl.InitParameters()
+    init.set_from_svo_file(svo_path)
+    init.svo_real_time_mode = False
+
+    zed = sl.Camera()
+    status = zed.open(init)
+    if status != sl.ERROR_CODE.SUCCESS:
+        print(f"Ошибка при открытии SVO: {status}")
+        return
+
+    calibration = zed.get_camera_information().camera_configuration.calibration_parameters
+
+    left_cam = calibration.left_cam
+    fx = left_cam.fx
+    fy = left_cam.fy
+    cx = left_cam.cx
+    cy = left_cam.cy
+
+    print(f"fx: {fx}, fy: {fy}")
+    print(f"cx: {cx}, cy: {cy}")
+    print(f"Resolution: {left_cam.image_size.width}x{left_cam.image_size.height}")
+
+    zed.close()
+    return fx, fy, cx, cy

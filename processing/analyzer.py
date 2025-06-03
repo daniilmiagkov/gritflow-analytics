@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import tifffile
 
-from processing.color_config import Config
-from processing.depth_config import DepthConfig
+from utils.convert import pixel_to_mm
+from processing.config import Config
 from processing.visual_config import VisualizationConfig
 
 # 1. Сегментация одноканального изображения
@@ -43,7 +43,7 @@ def segment_gray(
             cfg.adaptive_block_size, cfg.adaptive_C
         )
     else:
-        flag = cv2.THRESH_BINARY_INV if isinstance(cfg, DepthConfig) else cv2.THRESH_BINARY
+        flag = cv2.THRESH_BINARY_INV if isinstance(cfg, Config) else cv2.THRESH_BINARY
         if cfg.use_otsu and cfg.binary_thresh == 0:
             flag |= cv2.THRESH_OTSU
         _, b = cv2.threshold(m, cfg.binary_thresh, 255, flag)
@@ -78,11 +78,15 @@ def segment_gray(
 def analyze_gray(
     img_for_draw: np.ndarray,
     mask: np.ndarray,
-    cfg: Any
-) -> Tuple[np.ndarray, List[float], List[float]]:
+    cfg: Any,
+    depth_img: np.ndarray = None,
+    fx: float = 580.0,
+    fy: float = 580.0
+) -> Tuple[np.ndarray, List[float], List[float], List[float]]:
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     out = img_for_draw.copy()
-    diams: List[float] = []
+    diams_px: List[float] = []
+    diams_mm: List[float] = []
     xs:   List[float] = []
 
     for cnt in contours:
@@ -97,12 +101,26 @@ def analyze_gray(
             continue
 
         box = cv2.boxPoints(rect).astype(np.int32)
-        diams.append(d)
+        diams_px.append(d)
         xs.append(cx)
+
+        if depth_img is not None:
+            cx_i, cy_i = int(round(cx)), int(round(cy))
+            if 0 <= cx_i < depth_img.shape[1] and 0 <= cy_i < depth_img.shape[0]:
+                depth_val = float(depth_img[cy_i, cx_i])
+                d_mm = pixel_to_mm(d, depth_val, fx, fy)
+            else:
+                d_mm = 0.0
+        else:
+            d_mm = 0.0
+        diams_mm.append(d_mm)
+
         cv2.drawContours(out, [box], 0, cfg.bbox_color, cfg.bbox_thickness)
-        cv2.putText(out, f"{d:.1f}", (int(cx), int(cy)),
-                    cv2.FONT_HERSHEY_SIMPLEX, cfg.font_scale, cfg.bbox_color, cfg.font_thickness)
-    return out, diams, xs
+        # cv2.putText(out, f"{d_mm:.1f}mm", (int(cx), int(cy)),
+        #             cv2.FONT_HERSHEY_SIMPLEX, cfg.font_scale, cfg.bbox_color, cfg.font_thickness)
+
+    return out, diams_px, diams_mm, xs
+
 
 # 3a. Анализ цветного кадра
 def analyze_color_frame(
@@ -111,40 +129,49 @@ def analyze_color_frame(
     v_cfg: VisualizationConfig,
     label: str = "",
     output_dir: str = "",
-    save_plots: bool = False
-) -> Tuple[np.ndarray, List[float], List[float]]:
+    save_plots: bool = False,
+    depth_img: np.ndarray = None,
+    fx: float = 580.0,
+    fy: float = 580.0
+) -> Tuple[np.ndarray, List[float], List[float], List[float]]:
     img = (color_img*255).astype(np.uint8) if color_img.dtype != np.uint8 else color_img
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     steps = segment_gray(gray, cfg)
     steps["binary_mask_color"] = steps["binary_mask"]
 
     final_mask = steps["foreground_mask"]
-    res, diams, xs = analyze_gray(img, final_mask, cfg)
+    res, diams_px, diams_mm, xs = analyze_gray(img, final_mask, cfg, depth_img=depth_img, fx=fx, fy=fy)
     steps["result"] = res
 
     if save_plots:
         _save_plots(steps, "color", label, output_dir, v_cfg.plot_figsize)
-    return res, diams, xs
+    return res, diams_px, diams_mm, xs
 
 # 3b. Анализ depth-кадра
 def analyze_depth_frame(
     depth_img: np.ndarray,
-    cfg: DepthConfig,
+    cfg: Config,
     v_cfg: VisualizationConfig,
     label: str = "",
     output_dir: str = "",
-    save_plots: bool = False
-) -> Tuple[np.ndarray, List[float], List[float]]:
+    save_plots: bool = False,
+    fx: float = 580.0,
+    fy: float = 580.0
+) -> Tuple[np.ndarray, List[float], List[float], List[float], np.ndarray]:
+    # Нормализуем depth в uint8
     norm = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     steps = segment_gray(norm, cfg)
 
+    # Визуализация и анализ
     vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
-    res, diams, xs = analyze_gray(vis, steps["foreground_mask"], cfg)
+    res, diams_px, diams_mm, xs = analyze_gray(vis,steps["foreground_mask"], cfg, depth_img=depth_img, fx=fx, fy=fy)
     steps["result"] = res
 
     if save_plots:
         _save_plots(steps, "depth", label, output_dir, v_cfg.plot_figsize)
-    return res, diams, xs
+
+    return res, diams_px, diams_mm, xs
+
 
 # Сохранение промежуточных результатов
 def _save_plots(

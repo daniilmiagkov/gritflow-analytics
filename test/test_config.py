@@ -16,7 +16,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
 from processing.analyzer import analyze_frame
-from processing.color_config import Config
+from processing.config import Config
 from processing.visual_config import VisualizationConfig
 from config import OUTPUT_DIR, FRAME_NUMBER
 
