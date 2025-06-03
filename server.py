@@ -1,16 +1,17 @@
 # server.py
 import os
 import cv2
-import tifffile
 import base64
 import json
 import asyncio
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from zed.zed_loader import get_intrinsics_from_svo, init_camera, grab_frame
+# analyze_* → (out_bgr, rgba_contours, diams_px, diams_mm, xs)
 from processing.analyzer import analyze_color_frame, analyze_depth_frame
 
 from config import (
@@ -21,12 +22,21 @@ from config import (
 from processing.config import Config
 from processing.visual_config import VisualizationConfig
 
-# -----------------------------------------
-# Настройки
-NUM_FRAMES = 20  # Сколько кадров подряд обрабатываем
-# -----------------------------------------
+app = FastAPI()
 
-# Конфиги для анализа (по глубине и по цвету)
+# Раздаём статику из папки static/
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def get_index():
+    return FileResponse("static/index.html")
+
+
+# ------------------------------------------------
+# Конфигурации
+# ------------------------------------------------
+NUM_FRAMES = 40  # сколько кадров подряд обрабатываем
+
 depth_configs = [
     ("Depth-Big", Config(
         median_blur_size=3,
@@ -40,6 +50,7 @@ depth_configs = [
         max_particle_size=200,
         distance_transform_mask=0,
         foreground_threshold_ratio=0.50,
+        bbox_color=(255, 0, 0),  # цвет контура глубины (BGR)
         invert=True,
         equalize_hist=False,
         use_clahe=True,
@@ -47,7 +58,7 @@ depth_configs = [
 ]
 
 color_configs = [
-    ("Small", Config(
+    ("Color-Small", Config(
         adaptive_thresh=True,
         adaptive_block_size=13,
         adaptive_C=-7,
@@ -58,7 +69,7 @@ color_configs = [
         dilate_iterations=0,
         min_particle_size=10,
         max_particle_size=20,
-        bbox_color=(0, 255, 0),
+        bbox_color=(0, 255, 0),  # цвет контура для цветовой сегментации
         bbox_thickness=1,
         font_scale=0.5,
         font_thickness=0,
@@ -71,8 +82,7 @@ color_configs = [
 
 def apply_crop(image: np.ndarray, x, y, width, height):
     """
-    Обрезает изображение по прямоугольнику (x, y, width, height).
-    Возвращает (обрезанное_изображение, (x1, y1, new_width, new_height)).
+    Обрезает входное изображение по прямоугольнику (x, y, width, height).
     """
     h, w = image.shape[:2]
     x1 = max(0, x)
@@ -81,296 +91,119 @@ def apply_crop(image: np.ndarray, x, y, width, height):
     y2 = min(h, y1 + height)
     return image[y1:y2, x1:x2], (x1, y1, x2 - x1, y2 - y1)
 
-app = FastAPI()
 
-# -----------------------------------------
-# Паспорт HTML: теперь с кнопкой «Start» и отсроченным созданием WebSocket.
-# -----------------------------------------
-html = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Live Segmentation</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        #container { display: flex; flex-direction: column; align-items: center; }
-        #charts { display: flex; gap: 40px; margin-top: 20px; }
-        canvas { background: #f4f4f4; border: 1px solid #ccc; }
-        #status { margin-top: 10px; font-weight: bold; }
-        #startBtn { padding: 10px 20px; font-size: 16px; cursor: pointer; }
-    </style>
-</head>
-<body>
-    <div id="container">
-        <h2>Live Segmentation из SVO</h2>
-        <button id="startBtn">Запустить трансляцию</button>
-        <div id="status">Статус: не подключено</div>
-        <img id="segmentedImage" src="" alt="Segmentation" width="640" height="360" style="margin-top:20px;" />
-        <div id="charts">
-            <div>
-                <h4>Распределение диаметров (mm)</h4>
-                <canvas id="diamChart" width="400" height="300"></canvas>
-            </div>
-            <div>
-                <h4>Распределение по X</h4>
-                <canvas id="xChart" width="400" height="300"></canvas>
-            </div>
-        </div>
-    </div>
-
-    
-    <!-- Подключаем Chart.js (CDN) -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script>
-
-    let ws = null;
-        const startBtn = document.getElementById("startBtn");
-        const statusDiv = document.getElementById("status");
-        const imgElem = document.getElementById("segmentedImage");
-
-        // Инициализируем две пустые гистограммы через Chart.js
-        const diamCtx = document.getElementById("diamChart").getContext("2d");
-        const xCtx = document.getElementById("xChart").getContext("2d");
-
-        const diamChart = new Chart(diamCtx, {
-            type: 'bar',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Частота',
-                    data: [],
-                    backgroundColor: 'rgba(54, 162, 235, 0.6)',
-                    borderColor: 'rgba(54, 162, 235, 1)',
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: false,
-                scales: {
-                    x: { title: { display: true, text: 'Диаметр (мм)' } },
-                    y: { title: { display: true, text: 'Частота' } }
-                }
-            }
-        });
-
-        const xChart = new Chart(xCtx, {
-            type: 'bar',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'Частота',
-                    data: [],
-                    backgroundColor: 'rgba(255, 159, 64, 0.6)',
-                    borderColor: 'rgba(255, 159, 64, 1)',
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    x: { title: { display: true, text: 'X-координата (px)' } },
-                    y: { title: { display: true, text: 'Частота' } }
-                }
-            }
-        });
-    /**
-     * Обновлённая функция для биннинга и отрисовки гистограммы:
-     * - Если length(values) <= numBins → создаёт по одной корзине на каждое уникальное значение.
-     * - Иначе → классическое равномерное разбитие диапазона [minVal, maxVal] на numBins.
-     *
-     * @param {Chart} chartObj – экземпляр Chart.js
-     * @param {Array<number>} values – массив чисел (например, diams_mm или xs)
-     * @param {number} numBins – желаемое число корзин (bins)
-     */
-    function updateHistogram(chartObj, values, numBins) {
-        // 1) Если массив пуст или не определён → очищаем график
-        if (!values || values.length === 0) {
-            chartObj.data.labels = [];
-            chartObj.data.datasets[0].data = [];
-            chartObj.update();
-            return;
-        }
-
-        // 2) Если значений меньше либо равно numBins → создаём корзину для каждого уникального значения
-        if (values.length <= numBins) {
-            // Сначала найдём уникальные значения (в порядке появления)
-            const uniqueMap = new Map();
-            values.forEach(v => {
-                const key = v.toFixed(1); // округлим до 1-го знака, чтобы избежать "мелких" плавающих отклонений
-                uniqueMap.set(key, (uniqueMap.get(key) || 0) + 1);
-            });
-
-            const labels = Array.from(uniqueMap.keys());
-            const counts = Array.from(uniqueMap.values());
-
-            chartObj.data.labels = labels;
-            chartObj.data.datasets[0].data = counts;
-            chartObj.update();
-            return;
-        }
-
-        // 3) Иначе: когда значений больше numBins → обычное равномерное биннинг-деление
-        const minVal = Math.min(...values);
-        const maxVal = Math.max(...values);
-
-        // Если весь диапазон сводится в одну точку (теоретически) – одна корзина
-        if (minVal === maxVal) {
-            chartObj.data.labels = [minVal.toFixed(1)];
-            chartObj.data.datasets[0].data = [values.length];
-            chartObj.update();
-            return;
-        }
-
-        // 4) Обычный случай: разбиваем диапазон [minVal, maxVal] на numBins равных частей
-        const bins = numBins;
-        const range = maxVal - minVal;
-        const binSize = range / bins;
-        const labels = [];
-        const counts = new Array(bins).fill(0);
-
-        for (let i = 0; i < bins; i++) {
-            const left = minVal + i * binSize;
-            const right = left + binSize;
-            labels.push(left.toFixed(1) + "–" + right.toFixed(1));
-        }
-
-        // 5) Распределяем каждое значение по корзине
-        values.forEach(v => {
-            let idx = Math.floor((v - minVal) / binSize);
-            if (idx < 0) idx = 0;
-            if (idx >= bins) idx = bins - 1; // если v == maxVal
-            counts[idx]++;
-        });
-
-        chartObj.data.labels = labels;
-        chartObj.data.datasets[0].data = counts;
-        chartObj.update();
-    }
-
-    // Далее ваш код для WebSocket:
-    function startWebSocket() {
-        if (ws !== null) {
-            return;
-        }
-        ws = new WebSocket("ws://" + window.location.host + "/ws");
-
-        ws.onopen = function() {
-            statusDiv.innerText = "Статус: подключено";
-            startBtn.disabled = true;
-        };
-
-        ws.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-
-            // 1) Обновляем изображение
-            imgElem.src = "data:image/png;base64," + data.image_b64;
-
-            console.log("Получены diams_mm:", data.diams_mm);
-console.log("Получены xs:", data.xs);
-
-            // 2) Обновляем гистограмму диаметров (20 корзин)
-            updateHistogram(diamChart, data.diams_mm, 20);
-
-            // 3) Обновляем гистограмму по X (20 корзин)
-            updateHistogram(xChart, data.xs, 20);
-        };
-
-        ws.onclose = function() {
-            statusDiv.innerText = "Статус: отключено";
-            ws = null;
-            startBtn.disabled = false;
-        };
-
-        ws.onerror = function(err) {
-            console.error("Ошибка WebSocket:", err);
-            statusDiv.innerText = "Статус: ошибка";
-        };
-    }
-
-    startBtn.addEventListener("click", () => {
-        statusDiv.innerText = "Статус: подключение...";
-        startWebSocket();
-    });
-</script>
-
-</body>
-</html>
-"""
-
-@app.get("/")
-async def get_index():
+def alpha_composite(rgba_base: np.ndarray, rgba_overlay: np.ndarray) -> np.ndarray:
     """
-    Возвращает HTML-страницу с кнопкой и пустыми холстами Chart.js.
+    Классический альфа-композитинг (over).
+    Оба изображения (base и overlay) должны быть RGBA (H,W,4), dtype=uint8.
+    Возвращает новое RGBA (H,W,4).
     """
-    return HTMLResponse(html)
+    base_rgb = rgba_base[..., :3].astype(np.float32) / 255.0
+    base_a   = rgba_base[..., 3:].astype(np.float32) / 255.0  # shape (H,W,1)
+
+    over_rgb = rgba_overlay[..., :3].astype(np.float32) / 255.0
+    over_a   = rgba_overlay[..., 3:].astype(np.float32) / 255.0  # shape (H,W,1)
+
+    comp_a   = over_a + base_a * (1.0 - over_a)  # (H,W,1)
+    comp_rgb = over_rgb * over_a + base_rgb * base_a * (1.0 - over_a)  # (H,W,3)
+
+    comp_rgba = np.zeros_like(rgba_base, dtype=np.uint8)
+    # RGB
+    comp_rgba[..., :3] = np.clip(comp_rgb * 255.0, 0, 255).astype(np.uint8)
+    # Альфа: снимаем лишнюю размерность
+    comp_rgba[...,  3] = np.clip(comp_a[..., 0] * 255.0, 0, 255).astype(np.uint8)
+
+    return comp_rgba
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket-эндпоинт. После подключения строго по запросу клиента
-    (при клике кнопки) начинает отправлять обработанные кадры в JSON.
-    """
     await websocket.accept()
     print("Клиент подключился по WebSocket!")
 
     try:
-        # 1) Инициализируем камеру и параметры
+        # 1) Инициализируем камеру один раз
         zed = init_camera(SVO_PATH)
         fx, fy, *_ = get_intrinsics_from_svo(SVO_PATH)
         vis_cfg = VisualizationConfig(show_plots=False, plot_figsize=(4, 3))
 
-        # 2) Цикл по кадрам
+        # 2) Проходим по кадрам
         for i in range(NUM_FRAMES):
             current_frame = FRAME_NUMBER + i
             print(f"[СЕРВЕР] Обработка кадра #{current_frame}")
 
+            # 2.1) Захватим кадр
             image, depth, depth_shading, point_cloud = grab_frame(zed, current_frame)
             if image is None or depth is None:
-                print(f"[СЕРВЕР] WARNING: не удалось захватить кадр {current_frame}")
+                print(f"[СЕРВЕР] WARNING: не удалось получить кадр {current_frame}")
                 continue
 
+            # 2.2) Цвет (BGR) — убираем альфу, если есть
             color_np = image.get_data()
+            if color_np.ndim == 3 and color_np.shape[2] == 4:
+                color_np = color_np[:, :, :3]
+
+            # 2.3) Глубина (float32)
             depth_np = depth.get_data().astype(np.float32)
 
-            # Обрезка, если нужно
+            # 2.4) Обрезка, если CROP=True
             if CROP:
                 color_np, _ = apply_crop(color_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
                 depth_np, _ = apply_crop(depth_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
 
-            # --- Анализ Depth (первый конфиг) ---
-            label, cfg = depth_configs[0]
-            seg, diams_px, diams_mm, xs = analyze_depth_frame(
-                depth_np, cfg, vis_cfg,
-                label=label,
-                output_dir=None,   # не сохранять локально
-                save_plots=False,  # не рисовать серверные графики
+            # 3) Сегментация depth:
+            #    analyze_depth_frame → (out_bgr_depth, rgba_depth_contours, diams_px, diams_mm, xs)
+            out_bgr_d, rgba_depth_contours, diams_px, diams_mm, xs = analyze_depth_frame(
+                depth_np, depth_configs[0][1], vis_cfg,
+                label=depth_configs[0][0],
+                output_dir=None,
+                save_plots=False,
                 fx=fx, fy=fy
             )
 
-            # Кодируем сегментированное изображение в base64
-            success, buffer = cv2.imencode('.png', seg)
-            if not success:
-                print(f"[СЕРВЕР] Ошибка кодирования сегментации кадра {current_frame}")
-                continue
-            img_b64 = base64.b64encode(buffer).decode('utf-8')
+            # 4) Сегментация color:
+            out_bgr_c, rgba_color_contours, diams_color_px, diams_color_mm, xs_color = analyze_color_frame(
+                color_np, color_configs[0][1], vis_cfg,
+                label=color_configs[0][0],
+                output_dir=None,
+                save_plots=False,
+                depth_img=depth_np,
+                fx=fx, fy=fy
+            )
 
-            # Собираем JSON-пэйлоад
+            # 5) Строим RGBA-фон из color_np
+            h, w = color_np.shape[:2]
+            rgba_base = np.zeros((h, w, 4), dtype=np.uint8)
+            rgba_base[..., :3] = color_np
+            rgba_base[...,  3] = 255  # полностью непрозрачный фон
+
+            # 6) Альфа-композитинг: сначала depth-контуры, потом color-контуры
+            comp1 = alpha_composite(rgba_base, rgba_depth_contours)
+            comp2 = alpha_composite(comp1, rgba_color_contours)
+
+            # 7) Кодируем comp2 (RGBA) → PNG → base64
+            success, buffer = cv2.imencode('.png', comp2)
+            if not success:
+                print(f"[СЕРВЕР] Ошибка кодирования overlay_rgba кадра {current_frame}")
+                continue
+            overlay_b64 = base64.b64encode(buffer).decode('utf-8')
+
+            # 8) Отправляем JSON
             payload = {
                 "frame": current_frame,
-                "image_b64": img_b64,
-                "diams_mm": diams_mm,
-                "xs": xs,
+                "overlay_b64": overlay_b64,
+                "diams_mm": diams_px,          # глубинные диаметры
+                "xs": xs,                      # глубинные X
+                "diams_color_mm": diams_color_mm,  # цветовые диаметры
             }
             await websocket.send_text(json.dumps(payload))
 
-            # Небольшая пауза, чтобы не забивать канал
+            # 9) Лёгкая задержка
             await asyncio.sleep(0.1)
 
-        # После всех кадров закрываем камеру и соединение
+        # Закрываем камеру и WebSocket
         zed.close()
-        print("[СЕРВЕР] Обработка завершена, камера закрыта.")
+        print("[СЕРВЕР] Завершено, камера закрыта.")
         await websocket.close()
 
     except WebSocketDisconnect:

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Live Segmentation с оверлеем</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #container { display: flex; flex-direction: column; align-items: center; }
+    #charts { display: flex; gap: 40px; margin-top: 20px; }
+    canvas { background: #f4f4f4; border: 1px solid #ccc; }
+    #status { margin-top: 10px; font-weight: bold; }
+    #startBtn { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+    #thresholdContainer { margin-top: 10px; }
+    #alertLarge { margin-top: 10px; color: red; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <h2>Live Segmentation с оверлеем</h2>
+
+    <div id="thresholdContainer">
+      <label for="largeThreshold">Порог крупного объекта (мм): </label>
+      <input type="number" id="largeThreshold" value="100" step="1" min="0" />
+    </div>
+
+    <button id="startBtn">Запустить трансляцию</button>
+    <div id="status">Статус: не подключено</div>
+
+    <img id="segmentedImage" src="" alt="Segmentation Overlay"
+         width="640" height="360" style="margin-top:20px; border:1px solid #000;" />
+
+    <div id="alertLarge"></div>
+
+    <div id="charts">
+      <div>
+        <h4>Распределение диаметров (Depth, мм)</h4>
+        <canvas id="diamChart" width="400" height="300"></canvas>
+      </div>
+      <div>
+        <h4>Распределение диаметров (Color, мм)</h4>
+        <canvas id="diamColorChart" width="400" height="300"></canvas>
+      </div>
+      <div>
+        <h4>Распределение по X (Depth, px)</h4>
+        <canvas id="xChart" width="400" height="300"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    let ws = null;
+    const startBtn = document.getElementById("startBtn");
+    const statusDiv = document.getElementById("status");
+    const imgElem = document.getElementById("segmentedImage");
+    const alertLarge = document.getElementById("alertLarge");
+    const largeThresholdInput = document.getElementById("largeThreshold");
+
+    // Графики
+    const diamCtx = document.getElementById("diamChart").getContext("2d");
+    const diamColorCtx = document.getElementById("diamColorChart").getContext("2d");
+    const xCtx = document.getElementById("xChart").getContext("2d");
+
+    const diamChart = new Chart(diamCtx, {
+      type: 'bar',
+      data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(54, 162, 235, 0.6)', borderColor: 'rgba(54, 162, 235, 1)', borderWidth: 1 }] },
+      options: { responsive: false, scales: { x: { title: { display: true, text: 'Диаметр (мм)' } }, y: { title: { display: true, text: 'Частота' } } } }
+    });
+
+    const diamColorChart = new Chart(diamColorCtx, {
+      type: 'bar',
+      data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(75, 192, 192, 0.6)', borderColor: 'rgba(75, 192, 192, 1)', borderWidth: 1 }] },
+      options: { responsive: false, scales: { x: { title: { display: true, text: 'Диаметр (мм)' } }, y: { title: { display: true, text: 'Частота' } } } }
+    });
+
+    const xChart = new Chart(xCtx, {
+      type: 'bar',
+      data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(255, 159, 64, 0.6)', borderColor: 'rgba(255, 159, 64, 1)', borderWidth: 1 }] },
+      options: { responsive: false, scales: { x: { title: { display: true, text: 'X-координата (px)' } }, y: { title: { display: true, text: 'Частота' } } } }
+    });
+
+    // Универсальная функция биннинга и обновления гистограммы
+    function updateHistogram(chartObj, values, numBins) {
+      if (!values || values.length === 0) {
+        chartObj.data.labels = [];
+        chartObj.data.datasets[0].data = [];
+        chartObj.update();
+        return;
+      }
+      // Если мало значений, используем уникальные корзины
+      if (values.length <= numBins) {
+        const uniqueMap = new Map();
+        values.forEach(v => {
+          const key = v.toFixed(1);
+          uniqueMap.set(key, (uniqueMap.get(key) || 0) + 1);
+        });
+        const labels = Array.from(uniqueMap.keys());
+        const counts = Array.from(uniqueMap.values());
+        chartObj.data.labels = labels;
+        chartObj.data.datasets[0].data = counts;
+        chartObj.update();
+        return;
+      }
+      // Иначе равномерное деление на numBins
+      const minVal = Math.min(...values);
+      const maxVal = Math.max(...values);
+      if (minVal === maxVal) {
+        chartObj.data.labels = [minVal.toFixed(1)];
+        chartObj.data.datasets[0].data = [values.length];
+        chartObj.update();
+        return;
+      }
+      const bins = numBins;
+      const range = maxVal - minVal;
+      const binSize = range / bins;
+      const labels = [];
+      const counts = new Array(bins).fill(0);
+      for (let i = 0; i < bins; i++) {
+        const left = minVal + i * binSize;
+        const right = left + binSize;
+        labels.push(left.toFixed(1) + "–" + right.toFixed(1));
+      }
+      values.forEach(v => {
+        let idx = Math.floor((v - minVal) / binSize);
+        if (idx < 0) idx = 0;
+        if (idx >= bins) idx = bins - 1;
+        counts[idx]++;
+      });
+      chartObj.data.labels = labels;
+      chartObj.data.datasets[0].data = counts;
+      chartObj.update();
+    }
+
+    function startWebSocket() {
+      if (ws !== null) return;
+
+      ws = new WebSocket("ws://" + window.location.host + "/ws");
+
+      ws.onopen = () => {
+        statusDiv.innerText = "Статус: подключено";
+        startBtn.disabled = true;
+      };
+
+      ws.onmessage = event => {
+        const data = JSON.parse(event.data);
+        // 1) Обновляем оверлейное изображение
+        imgElem.src = "data:image/png;base64," + data.overlay_b64;
+
+        // 2) Проверяем «крупные» объекты по порогу
+        const thr = parseFloat(largeThresholdInput.value) || 0;
+        const foundLarge = (data.diams_mm.some(d => d >= thr) || data.diams_color_mm.some(d => d >= thr));
+        alertLarge.innerText = foundLarge ? "Найдены крупные элементы!" : "";
+
+        // 3) Обновляем гистограмму Depth (диаметры)
+        updateHistogram(diamChart, data.diams_mm, 20);
+        // 4) Обновляем гистограмму Color (диаметры)
+        updateHistogram(diamColorChart, data.diams_color_mm, 20);
+        // 5) Обновляем гистограмму по X (только Depth)
+        updateHistogram(xChart, data.xs, 20);
+      };
+
+      ws.onclose = () => {
+        statusDiv.innerText = "Статус: отключено";
+        ws = null;
+        startBtn.disabled = false;
+      };
+
+      ws.onerror = err => {
+        console.error("Ошибка WebSocket:", err);
+        statusDiv.innerText = "Статус: ошибка";
+      };
+    }
+
+    startBtn.addEventListener("click", () => {
+      statusDiv.innerText = "Статус: подключение...";
+      startWebSocket();
+    });
+  </script>
+</body>
+</html>
