@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from processing.analyzer import analyze_frame
-from processing.color_config import ColorConfig
+from processing.color_config import Config
 from processing.visual_config import VisualizationConfig
 from config import OUTPUT_DIR, FRAME_NUMBER  # предполагается, что они у тебя есть
 
@@ -43,7 +43,7 @@ def plot_diameters(diameters: list, x_positions: list, frame_number: int, title_
 
 def main():
     configs = [
-        ("Small", ColorConfig(
+        ("Small", Config(
             # === Пороговая обработка ===
             adaptive_thresh=True,
             adaptive_block_size=25,
@@ -56,7 +56,7 @@ def main():
             # === Морфология ===
             morph_kernel_shape='ellipse',
             morph_kernel_size=3,
-            morph_iterations=3,
+            morph_iterations=2,
             dilate_iterations=1,
 
             # === Детекция контуров ===
@@ -74,7 +74,7 @@ def main():
             distance_transform_mask=5,
             foreground_threshold_ratio=0.2
         )),
-        ("Big", ColorConfig(
+        ("Big", Config(
             # === Пороговая обработка ===
             adaptive_thresh=True,
             adaptive_block_size=3,

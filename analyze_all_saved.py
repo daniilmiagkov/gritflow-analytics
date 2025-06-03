@@ -4,10 +4,8 @@ import tifffile
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Импортируем наш единый пайплайн
 from processing.analyzer import analyze_depth_frame, analyze_color_frame
-# from processing.depth_config import DepthConfig
-from processing.color_config import ColorConfig
+from processing.color_config import Config
 from processing.visual_config import VisualizationConfig
 from config import OUTPUT_DIR, FRAME_NUMBER
 
@@ -51,24 +49,9 @@ def main():
     depth_np = load_saved_depth(FRAME_NUMBER)
     color_np = load_saved_color(FRAME_NUMBER)
 
-    # --- Конфигурации для малого и большого глубинного анализа ---
+    # --- Конфигурации для глубинного анализа ---
     depth_configs = [
-        ("Depth-Small", ColorConfig(
-            median_blur_size=1,
-            adaptive_thresh=True,
-            adaptive_block_size=41,
-            adaptive_C=-10,
-            use_otsu=False,
-            morph_kernel_size=3,
-            morph_iterations=1,
-            dilate_iterations=0,
-            min_contour_area=10,
-            min_particle_size=5,
-            max_particle_size=60,
-            distance_transform_mask=0,
-            foreground_threshold_ratio=0.3
-        )),
-        ("Depth-Big", ColorConfig(
+        ("Depth-Big", Config(
             median_blur_size=3,
             adaptive_thresh=True,
             adaptive_block_size=101,
@@ -86,10 +69,40 @@ def main():
         ))
     ]
 
-    # --- Конфигурации для цвета (пример) ---
+    # --- Конфигурации для цвета ---
     color_configs = [
-        # ("Color-Default", ColorConfig()),
-        # ту же логику можно повторить для малого и большого
+        ("Small", Config(
+            # === Пороговая обработка ===
+            adaptive_thresh=True,
+            adaptive_block_size=13,
+            adaptive_C=-7,
+
+            # === Гладкость и шумоподавление ===
+            median_blur_size=5,
+
+            # === Морфология ===
+            morph_kernel_shape='rect',
+            morph_kernel_size=3,
+            morph_iterations=1,
+            dilate_iterations=0,
+
+            # === Детекция контуров ===
+            min_particle_size=5,
+            max_particle_size=60,
+
+            # === Аннотации (Bounding Boxes) ===
+            bbox_color=(0, 255, 0),
+            bbox_thickness=1,
+            font_scale=0.5,
+            font_thickness=1,
+
+            # === Постобработка и выделение переднего плана ===
+            distance_transform_mask=5,
+            foreground_threshold_ratio=0.1,
+
+            use_clahe=True,
+            equalize_hist=True,
+        )),
     ]
 
     vis_cfg = VisualizationConfig(show_plots=True)
@@ -104,9 +117,9 @@ def main():
         out_path = os.path.join(OUTPUT_DIR, f"depth_seg_{label.lower()}_{FRAME_NUMBER}.png")
         cv2.imwrite(out_path, seg)
         print(f"[{label}] Сохранено сегментированное (depth): {out_path}")
-        # if diams:
-        #     print(f"[{label}] Найдено объектов: {len(diams)}  Диаметры: {min(diams):.1f}–{max(diams):.1f}")
-        #     plot_diameters(diams, xs, FRAME_NUMBER, label)
+        if diams:
+            print(f"[{label}] Найдено объектов: {len(diams)}  Диаметры: {min(diams):.1f}–{max(diams):.1f}")
+            plot_diameters(diams, xs, FRAME_NUMBER, label)
 
     # === Анализ цвета ===
     for label, cfg in color_configs:
@@ -118,9 +131,9 @@ def main():
         out_path = os.path.join(OUTPUT_DIR, f"color_seg_{label.lower()}_{FRAME_NUMBER}.png")
         cv2.imwrite(out_path, seg)
         print(f"[{label}] Сохранено сегментированное (color): {out_path}")
-        # if diams:
-        #     print(f"[{label}] Найдено объектов: {len(diams)}  Диаметры: {min(diams):.1f}–{max(diams):.1f}")
-        #     plot_diameters(diams, xs, FRAME_NUMBER, label)
+        if diams:
+            print(f"[{label}] Найдено объектов: {len(diams)}  Диаметры: {min(diams):.1f}–{max(diams):.1f}")
+            plot_diameters(diams, xs, FRAME_NUMBER, label)
 
 if __name__ == "__main__":
     main()
