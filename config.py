@@ -19,13 +19,6 @@ CROP_X = 100  # x-координата верхнего левого угла
 CROP_Y = 200  # y-координата верхнего левого угла
 CROP_WIDTH = 800
 CROP_HEIGHT = 350
-
 # Диапазон допустимых глубин в мм
 DEPTH_MIN = 990
 DEPTH_MAX = 2500
-
-# Порог глубины после нормализации (в 0-255)
-DEPTH_BIN_THRESHOLD = 1
-
-# Порог для distanceTransform (в долях от max)
-DISTANCE_THRESHOLD_RATIO = 0.5

@@ -4,4 +4,4 @@ from typing import Tuple
 @dataclass
 class VisualizationConfig:
     show_plots: bool = True
-    plot_figsize: Tuple[int, int] = (7, 14)
+    plot_figsize: Tuple[int, int] = (20, 80)

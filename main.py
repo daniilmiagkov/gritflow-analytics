@@ -5,7 +5,6 @@ from visualization.viewer import visualize_ply
 from config import (
     SVO_PATH, OUTPUT_DIR, FRAME_NUMBER,
     CROP, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT,
-    DEPTH_MIN, DEPTH_MAX
 )
 from processing.color_config import Config
 from processing.visual_config import VisualizationConfig

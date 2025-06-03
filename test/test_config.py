@@ -16,7 +16,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
 from processing.analyzer import analyze_frame
-from processing.color_config import ColorConfig
+from processing.color_config import Config
 from processing.visual_config import VisualizationConfig
 from config import OUTPUT_DIR, FRAME_NUMBER
 
@@ -50,7 +50,7 @@ def worker(args):
     global global_color
 
     try:
-        cfg = ColorConfig(**base_cfg_dict)
+        cfg = Config(**base_cfg_dict)
         for k, v in override.items():
             setattr(cfg, k, v)
 
@@ -138,7 +138,7 @@ def analyze_results(results: List[Dict[str, Any]], output_dir: str):
 
 
 def main():
-    base_cfg = ColorConfig()
+    base_cfg = Config()
     base_cfg_dict = vars(base_cfg)
 
     param_tests = {
@@ -178,7 +178,7 @@ def main():
     for r in filtered:
         print(f"✔ {r['path']} — всего: {r['total_count']}, больших: {r['big_count']}")
         # Можно показать конфиг, если надо:
-        cfg = ColorConfig(**{**vars(ColorConfig()), **r["params"]})
+        cfg = Config(**{**vars(Config()), **r["params"]})
         print(cfg)
         print()
 
