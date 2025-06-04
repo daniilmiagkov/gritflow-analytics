@@ -122,25 +122,30 @@ def analyze_gray(
     depth_img: np.ndarray = None,
     fx: float = 580.0,
     fy: float = 580.0
-) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float]]:
+) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[float]]:
     """
     :param img_for_draw: BGR-изображение (H×W×3), на котором будем рисовать прямоугольники
     :param mask: бинарная маска (H×W), где 255/True — «объект»
     :param cfg: конфиг с полями min_contour_area, min_particle_size, max_particle_size,
                bbox_color (BGR-цвет для линий), bbox_thickness
-    :param depth_img: (H×W) float32 — глубина для расчёта мм
+    :param depth_img: (H×W) float32 — глубина для расчёта в миллиметрах
     :return:
-        out_bgr: BGR (H×W×3) с отрисованными контурами (как раньше),
-        rgba_contours: RGBA (H×W×4) с теми же контурами, но на прозрачном фоне,
-        diams_px, diams_mm, xs – списки найденных объектов
+        out_bgr:             BGR (H×W×3) с отрисованными контурами,
+        rgba_contours:       RGBA (H×W×4) с контурами на прозрачном фоне,
+        widths_px:           List[float] — ширины (в пикселях) ограничивающих прямоугольников,
+        heights_px:          List[float] — высоты (в пикселях) ограничивающих прямоугольников,
+        diagonals_mm:        List[float] — диагонали (в миллиметрах) каждого прямоугольника,
+        xs:                  List[float] — X-координаты центров каждого прямоугольника.
     """
     # 1) Находим внешние контуры
     contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     out_bgr = img_for_draw.copy()
-    diams_px: List[float] = []
-    diams_mm: List[float] = []
-    xs:   List[float] = []
+    widths_px:    List[float] = []
+    heights_px:   List[float] = []
+    diagonals_px: List[float] = []
+    diagonals_mm: List[float] = []
+    xs:           List[float] = []
 
     h, w = mask.shape
     mask_boxes = np.zeros((h, w), dtype=np.uint8)
@@ -152,35 +157,42 @@ def analyze_gray(
 
         rect = cv2.minAreaRect(cnt)
         (cx, cy), (w_box, h_box), _ = rect
-        d = float(np.hypot(w_box, h_box))
-        if not (cfg.min_particle_size <= d <= cfg.max_particle_size):
+
+        # Отфильтровываем по диапазону: здесь проверяем диагональ (которую пока не считали)
+        diag_px = float(np.hypot(w_box, h_box))
+        if not (cfg.min_particle_size <= diag_px <= cfg.max_particle_size):
             continue
 
         box = cv2.boxPoints(rect).astype(np.int32)
-        diams_px.append(d)
+
+        # Сохраняем ширину/высоту/диагональ
+        widths_px.append(w_box)
+        heights_px.append(h_box)
+        diagonals_px.append(diag_px)
         xs.append(cx)
 
+        # Переводим диагональ в миллиметры (по формуле)
         if depth_img is not None:
             cx_i, cy_i = int(round(cx)), int(round(cy))
             if 0 <= cx_i < depth_img.shape[1] and 0 <= cy_i < depth_img.shape[0]:
                 depth_val = float(depth_img[cy_i, cx_i])
-                d_mm = pixel_to_mm(d, depth_val, fx, fy)
+                diag_mm = pixel_to_mm(diag_px, depth_val, fx, fy)
             else:
-                d_mm = 0.0
+                diag_mm = 0.0
         else:
-            d_mm = 0.0
-        diams_mm.append(d_mm)
+            diag_mm = 0.0
+        diagonals_mm.append(diag_mm)
 
         # 2) Рисуем бокс на цветном out_bgr
         cv2.drawContours(out_bgr, [box], 0, cfg.bbox_color, cfg.bbox_thickness)
 
-        # 3) Заполняем бокс в mask_boxes (thickness=-1 → заливка)
+        # 3) Заполняем этот прямоугольник в mask_boxes
         cv2.drawContours(mask_boxes, [box], 0, 255, thickness=-1)
 
     # 4) Построим RGBA-слой контуров из mask_boxes
     rgba_contours = contours_to_rgba(mask_boxes, color_bgr=cfg.bbox_color, thickness=cfg.bbox_thickness)
 
-    return out_bgr, rgba_contours, diams_px, diams_mm, xs
+    return out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs
 
 
 # --------------------------------------------------
@@ -196,22 +208,24 @@ def analyze_color_frame(
     depth_img: np.ndarray = None,
     fx: float = 580.0,
     fy: float = 580.0
-) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float]]:
-    img = (color_img*255).astype(np.uint8) if color_img.dtype != np.uint8 else color_img
+) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[float]]:
+    """
+    :return: out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs
+    """
+    img = (color_img * 255).astype(np.uint8) if color_img.dtype != np.uint8 else color_img
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     steps = segment_gray(gray, cfg)
     steps["binary_mask_color"] = steps["binary_mask"]
 
     final_mask = steps["foreground_mask"]
-    # analyze_gray вернёт (out_bgr, rgba_contours, diams_px, diams_mm, xs)
-    out_bgr, rgba_contours, diams_px, diams_mm, xs = analyze_gray(
+    out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs = analyze_gray(
         img, final_mask, cfg, depth_img=depth_img, fx=fx, fy=fy
     )
     steps["result"] = out_bgr
 
     if save_plots:
         _save_plots(steps, "color", label, output_dir, v_cfg.plot_figsize)
-    return out_bgr, rgba_contours, diams_px, diams_mm, xs
+    return out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs
 
 
 # --------------------------------------------------
@@ -226,21 +240,22 @@ def analyze_depth_frame(
     save_plots: bool = False,
     fx: float = 580.0,
     fy: float = 580.0
-) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float]]:
-    # Нормализуем глубину в uint8
+) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], List[float], List[float]]:
+    """
+    :return: out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs
+    """
     norm = cv2.normalize(depth_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     steps = segment_gray(norm, cfg)
 
     vis = cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)
-    out_bgr, rgba_contours, diams_px, diams_mm, xs = analyze_gray(
+    out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs = analyze_gray(
         vis, steps["foreground_mask"], cfg, depth_img=depth_img, fx=fx, fy=fy
     )
     steps["result"] = out_bgr
 
     if save_plots:
         _save_plots(steps, "depth", label, output_dir, v_cfg.plot_figsize)
-
-    return out_bgr, rgba_contours, diams_px, diams_mm, xs
+    return out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs
 
 
 # --------------------------------------------------
@@ -256,7 +271,7 @@ def _save_plots(
     last_title, last_img = list(steps.items())[-1]
     fig = plt.figure(figsize=(figsize[0], figsize[1]))
     plt.title(f"{mode.upper()}[{label}] {last_title}")
-    plt.imshow(last_img, cmap='gray' if last_img.ndim==2 else None)
+    plt.imshow(last_img, cmap='gray' if last_img.ndim == 2 else None)
     plt.axis('off')
     path = os.path.join(output_dir, f"{mode}_{label}_result.png")
     fig.savefig(path); plt.close(fig)
@@ -264,10 +279,10 @@ def _save_plots(
     items = list(steps.items())[:-1]
     n = len(items)
     fig = plt.figure(figsize=(figsize[0], figsize[1]))
-    for i,(t, im) in enumerate(items):
-        ax = fig.add_subplot(n, 1, i+1)
+    for i, (t, im) in enumerate(items):
+        ax = fig.add_subplot(n, 1, i + 1)
         ax.set_title(f"{mode.upper()}[{label}] {t}")
-        ax.imshow(im, cmap='gray' if im.ndim==2 else None)
+        ax.imshow(im, cmap='gray' if im.ndim == 2 else None)
         ax.axis('off')
     path = os.path.join(output_dir, f"{mode}_{label}_steps.png")
     fig.savefig(path); plt.close(fig)
@@ -281,13 +296,13 @@ if __name__ == "__main__":
     vis_cfg   = VisualizationConfig(show_plots=True)
 
     img = cv2.imread(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_color.png"))
-    c_res, c_rgba, c_diams, c_xs = analyze_color_frame(
+    c_res, c_rgba, c_w_px, c_h_px, c_d_mm, c_xs = analyze_color_frame(
         img, color_cfg, vis_cfg,
         label="C1", output_dir=OUTPUT_DIR, save_plots=True
     )
 
     depth = tifffile.imread(os.path.join(OUTPUT_DIR, f"frame_{FRAME_NUMBER}_depth.tiff"))
-    d_res, d_rgba, d_diams, d_xs = analyze_depth_frame(
+    d_res, d_rgba, d_w_px, d_h_px, d_d_mm, d_xs = analyze_depth_frame(
         depth, depth_cfg, vis_cfg,
         label="D1", output_dir=OUTPUT_DIR, save_plots=True
     )

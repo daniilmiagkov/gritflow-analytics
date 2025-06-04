@@ -11,12 +11,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from zed.zed_loader import get_intrinsics_from_svo, init_camera, grab_frame
-# analyze_* → (out_bgr, rgba_contours, diams_px, diams_mm, xs)
+# analyze_* возвращают теперь 6 полей:
+#   out_bgr, rgba_contours, widths_px, heights_px, diagonals_mm, xs
 from processing.analyzer import analyze_color_frame, analyze_depth_frame
 
 from config import (
     SVO_PATH,
-    FRAME_NUMBER,  # стартовый кадр
+    FRAME_NUMBER,  # стартовый кадр (будет игнорироваться, если позволяем клиенту задавать диапазон)
     CROP, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT,
 )
 from processing.config import Config
@@ -35,7 +36,9 @@ async def get_index():
 # ------------------------------------------------
 # Конфигурации
 # ------------------------------------------------
-NUM_FRAMES = 40  # сколько кадров подряд обрабатываем
+# Теперь диапазон кадров задаёт клиент, поэтому NUM_FRAMES не используется напрямую
+# Но оставим его, если нужно ограничить максимальный длину
+NUM_FRAMES = 1000  # просто потолок на число кадров, если потребуется
 
 depth_configs = [
     ("Depth-Big", Config(
@@ -50,7 +53,7 @@ depth_configs = [
         max_particle_size=200,
         distance_transform_mask=0,
         foreground_threshold_ratio=0.50,
-        bbox_color=(255, 0, 0),  # цвет контура глубины (BGR)
+        bbox_color=(255, 0, 0),  # контуры глубины — красным
         invert=True,
         equalize_hist=False,
         use_clahe=True,
@@ -69,7 +72,7 @@ color_configs = [
         dilate_iterations=0,
         min_particle_size=10,
         max_particle_size=20,
-        bbox_color=(0, 255, 0),  # цвет контура для цветовой сегментации
+        bbox_color=(0, 255, 0),  # контуры цвета — зелёным
         bbox_thickness=1,
         font_scale=0.5,
         font_thickness=0,
@@ -94,66 +97,76 @@ def apply_crop(image: np.ndarray, x, y, width, height):
 
 def alpha_composite(rgba_base: np.ndarray, rgba_overlay: np.ndarray) -> np.ndarray:
     """
-    Классический альфа-композитинг (over).
-    Оба изображения (base и overlay) должны быть RGBA (H,W,4), dtype=uint8.
+    Альфа-композитинг (over). base и overlay должны быть RGBA (H,W,4), dtype=uint8.
     Возвращает новое RGBA (H,W,4).
     """
     base_rgb = rgba_base[..., :3].astype(np.float32) / 255.0
-    base_a   = rgba_base[..., 3:].astype(np.float32) / 255.0  # shape (H,W,1)
+    base_a   = rgba_base[..., 3:].astype(np.float32) / 255.0  # (H,W,1)
 
     over_rgb = rgba_overlay[..., :3].astype(np.float32) / 255.0
-    over_a   = rgba_overlay[..., 3:].astype(np.float32) / 255.0  # shape (H,W,1)
+    over_a   = rgba_overlay[..., 3:].astype(np.float32) / 255.0  # (H,W,1)
 
-    comp_a   = over_a + base_a * (1.0 - over_a)  # (H,W,1)
+    comp_a   = over_a + base_a * (1.0 - over_a)               # (H,W,1)
     comp_rgb = over_rgb * over_a + base_rgb * base_a * (1.0 - over_a)  # (H,W,3)
 
     comp_rgba = np.zeros_like(rgba_base, dtype=np.uint8)
-    # RGB
     comp_rgba[..., :3] = np.clip(comp_rgb * 255.0, 0, 255).astype(np.uint8)
-    # Альфа: снимаем лишнюю размерность
     comp_rgba[...,  3] = np.clip(comp_a[..., 0] * 255.0, 0, 255).astype(np.uint8)
-
     return comp_rgba
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    start: int = None,
+    end:   int = None
+):
+    """
+    После подключения клиент передаёт параметры start и end
+    через параметры запроса (?start=...&end=...). 
+    Обрабатываем кадры в диапазоне [start..end].
+    """
     await websocket.accept()
-    print("Клиент подключился по WebSocket!")
+    print(f"[СЕРВЕР] WebSocket открыт (кадры {start}–{end})")
+
+    # Если переданы неверные параметры, закрываем соединение
+    if start is None or end is None or start < 0 or end < start:
+        await websocket.send_text(json.dumps({"error": "Неверный диапазон кадров"}))
+        await websocket.close()
+        return
 
     try:
-        # 1) Инициализируем камеру один раз
+        # 1) Один раз инициализируем ZED и параметры
         zed = init_camera(SVO_PATH)
         fx, fy, *_ = get_intrinsics_from_svo(SVO_PATH)
         vis_cfg = VisualizationConfig(show_plots=False, plot_figsize=(4, 3))
 
-        # 2) Проходим по кадрам
-        for i in range(NUM_FRAMES):
-            current_frame = FRAME_NUMBER + i
-            print(f"[СЕРВЕР] Обработка кадра #{current_frame}")
+        # 2) Проходим по каждому кадру в диапазоне [start..end]
+        for frame_idx in range(start, end + 1):
+            print(f"[СЕРВЕР] Обработка кадра #{frame_idx}")
 
-            # 2.1) Захватим кадр
-            image, depth, depth_shading, point_cloud = grab_frame(zed, current_frame)
+            # 2.1) Захват кадра
+            image, depth, depth_shading, point_cloud = grab_frame(zed, frame_idx)
             if image is None or depth is None:
-                print(f"[СЕРВЕР] WARNING: не удалось получить кадр {current_frame}")
+                print(f"[СЕРВЕР] WARNING: кадр {frame_idx} не получен, пропускаем")
                 continue
 
-            # 2.2) Цвет (BGR) — убираем альфу, если есть
+            # 2.2) Получаем цветной BGR (убираем альфу, если есть)
             color_np = image.get_data()
             if color_np.ndim == 3 and color_np.shape[2] == 4:
                 color_np = color_np[:, :, :3]
 
-            # 2.3) Глубина (float32)
+            # 2.3) Глубина
             depth_np = depth.get_data().astype(np.float32)
 
-            # 2.4) Обрезка, если CROP=True
+            # 2.4) Обрезка (если требуется)
             if CROP:
                 color_np, _ = apply_crop(color_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
                 depth_np, _ = apply_crop(depth_np, CROP_X, CROP_Y, CROP_WIDTH, CROP_HEIGHT)
 
             # 3) Сегментация depth:
-            #    analyze_depth_frame → (out_bgr_depth, rgba_depth_contours, diams_px, diams_mm, xs)
-            out_bgr_d, rgba_depth_contours, diams_px, diams_mm, xs = analyze_depth_frame(
+            #    analyze_depth_frame → (out_bgr_d, rgba_d, widths_d_px, heights_d_px, diagonals_d_mm, xs_d)
+            out_bgr_d, rgba_d, widths_d_px, heights_d_px, diagonals_d_mm, xs_d = analyze_depth_frame(
                 depth_np, depth_configs[0][1], vis_cfg,
                 label=depth_configs[0][0],
                 output_dir=None,
@@ -162,7 +175,8 @@ async def websocket_endpoint(websocket: WebSocket):
             )
 
             # 4) Сегментация color:
-            out_bgr_c, rgba_color_contours, diams_color_px, diams_color_mm, xs_color = analyze_color_frame(
+            #    analyze_color_frame → (out_bgr_c, rgba_c, widths_c_px, heights_c_px, diagonals_c_mm, xs_c)
+            out_bgr_c, rgba_c, widths_c_px, heights_c_px, diagonals_c_mm, xs_c = analyze_color_frame(
                 color_np, color_configs[0][1], vis_cfg,
                 label=color_configs[0][0],
                 output_dir=None,
@@ -171,43 +185,50 @@ async def websocket_endpoint(websocket: WebSocket):
                 fx=fx, fy=fy
             )
 
-            # 5) Строим RGBA-фон из color_np
+            # 5) Формируем базовый RGBA-фон из color_np
             h, w = color_np.shape[:2]
             rgba_base = np.zeros((h, w, 4), dtype=np.uint8)
             rgba_base[..., :3] = color_np
             rgba_base[...,  3] = 255  # полностью непрозрачный фон
 
-            # 6) Альфа-композитинг: сначала depth-контуры, потом color-контуры
-            comp1 = alpha_composite(rgba_base, rgba_depth_contours)
-            comp2 = alpha_composite(comp1, rgba_color_contours)
+            # 6) Альфа-композитинг: сначала контуры глубины, потом контуры цвета
+            comp1 = alpha_composite(rgba_base, rgba_d)
+            comp2 = alpha_composite(comp1, rgba_c)
 
             # 7) Кодируем comp2 (RGBA) → PNG → base64
             success, buffer = cv2.imencode('.png', comp2)
             if not success:
-                print(f"[СЕРВЕР] Ошибка кодирования overlay_rgba кадра {current_frame}")
+                print(f"[СЕРВЕР] Ошибка кодирования RGBA-изображения кадра {frame_idx}")
                 continue
             overlay_b64 = base64.b64encode(buffer).decode('utf-8')
 
-            # 8) Отправляем JSON
+            # 8) Отправляем JSON-пэйлоад с новыми полями:
             payload = {
-                "frame": current_frame,
+                "frame": frame_idx,
                 "overlay_b64": overlay_b64,
-                "diams_mm": diams_px,          # глубинные диаметры
-                "xs": xs,                      # глубинные X
-                "diams_color_mm": diams_color_mm,  # цветовые диаметры
+                # передаём параметры частиц по глубине:
+                "widths_depth_px":    widths_d_px,
+                "heights_depth_px":   heights_d_px,
+                "diagonals_depth_mm": diagonals_d_mm,
+                "xs_depth":           xs_d,
+                # параметры частиц по цвету:
+                "widths_color_px":    widths_c_px,
+                "heights_color_px":   heights_c_px,
+                "diagonals_color_mm": diagonals_c_mm,
+                "xs_color":           xs_c,
             }
             await websocket.send_text(json.dumps(payload))
 
-            # 9) Лёгкая задержка
+            # 9) Лёгкая задержка, чтобы не перегружать канал
             await asyncio.sleep(0.1)
 
-        # Закрываем камеру и WebSocket
+        # 10) Закрываем камеру и WebSocket
         zed.close()
-        print("[СЕРВЕР] Завершено, камера закрыта.")
+        print("[СЕРВЕР] Обработка диапазона завершена, камера закрыта.")
         await websocket.close()
 
     except WebSocketDisconnect:
-        print("Клиент отключился.")
+        print("[СЕРВЕР] Клиент отключился.")
     except Exception as e:
         print(f"[СЕРВЕР] Ошибка: {e}")
         try:

@@ -153,7 +153,9 @@ def main():
             subdir = depth_dirs[label]
             print(f"\n--- Анализ Depth: {label} ---")
 
-            seg, diams_px, diams_mm, xs = analyze_depth_frame(
+            # раньше: seg, diams_px, diams_mm, xs = analyze_depth_frame(...)
+            # теперь: out_bgr_d, rgba_d, widths_d_px, heights_d_px, diagonals_d_mm, xs_d
+            seg, rgba_d, widths_d_px, heights_d_px, diagonals_d_mm, xs_d = analyze_depth_frame(
                 depth_np, cfg, vis_cfg,
                 label=label,
                 output_dir=subdir,
@@ -166,8 +168,9 @@ def main():
             cv2.imwrite(seg_path, seg)
             print(f"[{label}] Сегментация сохранена: {seg_path}")
 
-            if diams_mm:
-                print(f"[{label}] Объектов: {len(diams_mm)} | Диапазон: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
+            if diagonals_d_mm:
+                print(f"[{label}] Объектов: {len(diagonals_d_mm)} | "
+                      f"Диагонали (мм): {min(diagonals_d_mm):.1f}–{max(diagonals_d_mm):.1f}")
             else:
                 print(f"[{label}] Нет объектов.")
 
@@ -176,7 +179,9 @@ def main():
             subdir = color_dirs[label]
             print(f"\n--- Анализ Color: {label} ---")
 
-            seg, diams_px, diams_mm, xs = analyze_color_frame(
+            # раньше: seg, diams_px, diams_mm, xs = analyze_color_frame(...)
+            # теперь: out_bgr_c, rgba_c, widths_c_px, heights_c_px, diagonals_c_mm, xs_c
+            seg, rgba_c, widths_c_px, heights_c_px, diagonals_c_mm, xs_c = analyze_color_frame(
                 color_np, cfg, vis_cfg,
                 label=label,
                 output_dir=subdir,
@@ -190,8 +195,9 @@ def main():
             cv2.imwrite(seg_path, seg)
             print(f"[{label}] Сегментация сохранена: {seg_path}")
 
-            if diams_mm:
-                print(f"[{label}] Объектов: {len(diams_mm)} | Диапазон: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
+            if diagonals_c_mm:
+                print(f"[{label}] Объектов: {len(diagonals_c_mm)} | "
+                      f"Диагонали (мм): {min(diagonals_c_mm):.1f}–{max(diagonals_c_mm):.1f}")
             else:
                 print(f"[{label}] Нет объектов.")
 

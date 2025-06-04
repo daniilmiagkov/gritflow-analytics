@@ -25,21 +25,21 @@ def load_saved_color(frame_number: int) -> np.ndarray:
         raise FileNotFoundError(f"Цветное изображение не найдено: {path}")
     return img
 
-def plot_diameters(diams: list, xs: list, frame_number: int, title: str):
-    if not diams:
+def plot_diagonals(diags: list, xs: list, frame_number: int, title: str):
+    if not diags:
         print(f"[{title}] Нет данных для графика.")
         return
-    fig, (ax1, ax2) = plt.subplots(2,1, figsize=(10,8))
-    ax1.hist(diams, bins=30, color='skyblue', edgecolor='black')
-    ax1.set_title(f"{title} — Диаметры (кадр {frame_number})")
-    ax1.set_xlabel("Диаметр, мм")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    ax1.hist(diags, bins=30, color='skyblue', edgecolor='black')
+    ax1.set_title(f"{title} — Диагонали (кадр {frame_number})")
+    ax1.set_xlabel("Диагональ, мм")
     ax1.set_ylabel("Частота")
     ax1.grid(True)
 
-    ax2.scatter(xs, diams, c='green', edgecolors='black', alpha=0.7)
-    ax2.set_title(f"{title} — Диаметры по X (кадр {frame_number})")
+    ax2.scatter(xs, diags, c='green', edgecolors='black', alpha=0.7)
+    ax2.set_title(f"{title} — Диагонали по X (кадр {frame_number})")
     ax2.set_xlabel("X-позиция (пиксели)")
-    ax2.set_ylabel("Диаметр, мм")
+    ax2.set_ylabel("Диагональ, мм")
     ax2.grid(True)
 
     plt.tight_layout()
@@ -70,7 +70,7 @@ def main():
         ))
     ]
 
-    # --- Конфигурации для цвета ---
+    # --- Конфигурации для цветового анализа ---
     color_configs = [
         ("Small", Config(
             # === Пороговая обработка ===
@@ -110,27 +110,33 @@ def main():
     fx, fy, *_ = get_intrinsics_from_svo(SVO_PATH)
 
     for label, cfg in depth_configs:
-            print(f"\n=== Анализ Depth: {label} ===")
-            seg, diams_px, diams_mm, xs= analyze_depth_frame(
-                depth_np, cfg, vis_cfg,
-                label=label,
-                output_dir=OUTPUT_DIR,
-                save_plots=True,
-                fx=fx, fy=fy
-            )
+        print(f"\n=== Анализ Depth: {label} ===")
+        # Теперь analyze_depth_frame возвращает:
+        # out_bgr (с контурами), rgba_contours, widths_px, heights_px, diagonals_mm, xs
+        out_bgr_d, rgba_d, widths_d_px, heights_d_px, diagonals_d_mm, xs_d = analyze_depth_frame(
+            depth_np, cfg, vis_cfg,
+            label=label,
+            output_dir=OUTPUT_DIR,
+            save_plots=True,
+            fx=fx, fy=fy
+        )
 
-            out_path = os.path.join(OUTPUT_DIR, f"depth_seg_{label.lower()}_{FRAME_NUMBER}.png")
-            cv2.imwrite(out_path, seg)
-            print(f"[{label}] Сохранено сегментированное (depth): {out_path}")
-            if diams_mm:
-                print(f"[{label}] Найдено объектов: {len(diams_mm)}  Диаметры: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
-                plot_diameters(diams_mm, xs, FRAME_NUMBER, label)
-            else:
-                print(f"[{label}] Объекты не найдены.")
+        out_path = os.path.join(OUTPUT_DIR, f"depth_seg_{label.lower()}_{FRAME_NUMBER}.png")
+        cv2.imwrite(out_path, out_bgr_d)
+        print(f"[{label}] Сохранено сегментированное (depth): {out_path}")
+
+        if diagonals_d_mm:
+            print(f"[{label}] Найдено объектов: {len(diagonals_d_mm)}  Диагонали: {min(diagonals_d_mm):.1f}–{max(diagonals_d_mm):.1f} мм")
+            plot_diagonals(diagonals_d_mm, xs_d, FRAME_NUMBER, label)
+        else:
+            print(f"[{label}] Объекты не найдены.")
+
     # === Анализ цвета ===
     for label, cfg in color_configs:
         print(f"\n=== Анализ Color: {label} ===")
-        seg, diams_px, diams_mm, xs = analyze_color_frame(
+        # Теперь analyze_color_frame возвращает:
+        # out_bgr (с контурами), rgba_contours, widths_px, heights_px, diagonals_mm, xs
+        out_bgr_c, rgba_c, widths_c_px, heights_c_px, diagonals_c_mm, xs_c = analyze_color_frame(
             color_np, cfg, vis_cfg,
             label=label,
             output_dir=OUTPUT_DIR,
@@ -139,12 +145,16 @@ def main():
             fx=fx,
             fy=fy,
         )
+
         out_path = os.path.join(OUTPUT_DIR, f"color_seg_{label.lower()}_{FRAME_NUMBER}.png")
-        cv2.imwrite(out_path, seg)
+        cv2.imwrite(out_path, out_bgr_c)
         print(f"[{label}] Сохранено сегментированное (color): {out_path}")
-        if diams_mm:
-            print(f"[{label}] Найдено объектов: {len(diams_mm)}  Диаметры: {min(diams_mm):.1f}–{max(diams_mm):.1f} мм")
-            plot_diameters(diams_mm, xs, FRAME_NUMBER, label)
+
+        if diagonals_c_mm:
+            print(f"[{label}] Найдено объектов: {len(diagonals_c_mm)}  Диагонали: {min(diagonals_c_mm):.1f}–{max(diagonals_c_mm):.1f} мм")
+            plot_diagonals(diagonals_c_mm, xs_c, FRAME_NUMBER, label)
+        else:
+            print(f"[{label}] Объекты не найдены.")
 
 if __name__ == "__main__":
     main()
