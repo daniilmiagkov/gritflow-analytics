@@ -19,7 +19,7 @@ from processing.visual_config import VisualizationConfig
 
 # -----------------------------------------
 # Задаём, сколько кадров подряд обрабатываем
-NUM_FRAMES = 20
+NUM_FRAMES = 1
 # -----------------------------------------
 
 # --- Конфигурации для глубинного анализа (пример) ---
@@ -135,13 +135,15 @@ def main():
 
         # --- Сохраняем исходники в raw ---
         # color_path = os.path.join(raw_dir, f"color_frame_{current_frame}.png")
-        depth_path = os.path.join(raw_dir, f"depth_frame_{current_frame}.tiff")
+        depth_path_png = os.path.join(raw_dir, f"depth_frame_{current_frame}.png")
+        depth_path_tiff = os.path.join(raw_dir, f"depth_frame_{current_frame}.tiff")
+
         # # shading_path = os.path.join(raw_dir, f"depth_shading_frame_{current_frame}.png")
         # # ply_path = os.path.join(raw_dir, f"point_cloud_{current_frame}.ply")
 
         # cv2.imwrite(color_path, color_np)
-        # tifffile.imwrite(depth_path, depth_np)
-        cv2.imwrite(depth_path, depth_np)
+        tifffile.imwrite(depth_path_tiff, depth_np)
+        cv2.imwrite(depth_path_png, depth_np)
 
         # # cv2.imwrite(shading_path, depth_shading_np)
         # # save_point_cloud(point_cloud, ply_path)
