@@ -219,9 +219,6 @@ async def websocket_endpoint(
             }
             await websocket.send_text(json.dumps(payload))
 
-            # 9) Лёгкая задержка, чтобы не перегружать канал
-            await asyncio.sleep(0.1)
-
         # 10) Закрываем камеру и WebSocket
         zed.close()
         print("[СЕРВЕР] Обработка диапазона завершена, камера закрыта.")
