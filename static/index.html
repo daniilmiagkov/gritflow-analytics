@@ -2,25 +2,79 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <title>Live Segmentation с оверлеем</title>
+  <title>Live Segmentation – отладка графиков</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
     #container { display: flex; flex-direction: column; align-items: center; }
+
     #controls { display: flex; gap: 10px; margin-bottom: 10px; }
-    #charts { display: flex; gap: 40px; margin-top: 20px; }
-    canvas { background: #f4f4f4; border: 1px solid #ccc; }
-    #status { margin-top: 10px; font-weight: bold; }
-    #startBtn { padding: 10px 20px; font-size: 16px; cursor: pointer; }
     input[type="number"] { width: 80px; padding: 5px; font-size: 14px; }
+
+    #status { margin-top: 10px; font-weight: bold; }
+    #frameInfo { margin-top: 10px; font-weight: bold; }
+
     #thresholdContainer { margin-top: 10px; }
     #alertLarge { margin-top: 10px; color: red; font-weight: bold; }
-    #frameInfo { margin-top: 10px; font-weight: bold; }
+
+    #overlayContainer {
+      margin-top: 20px;
+      border: 1px solid #000;
+      width: 640px;
+      height: 360px;
+    }
+    #segmentedImage {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    #checkboxContainer {
+      margin-top: 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .checkbox-group {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      border: 1px solid #ccc;
+      padding: 8px;
+      border-radius: 4px;
+      background: #fafafa;
+    }
+    .checkbox-group h4 {
+      margin: 0 0 5px 0;
+      font-size: 14px;
+    }
+
+    #chartsWrapper {
+      margin-top: 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 40px;
+      justify-content: center;
+    }
+    .chart-box {
+      display: none; /* по умолчанию спрятаны */
+      flex-direction: column;
+      align-items: center;
+    }
+    .chart-box h4 {
+      margin: 0 0 5px 0;
+      font-size: 14px;
+    }
+    .chart-box canvas {
+      background: #f4f4f4;
+      border: 1px solid #ccc;
+    }
   </style>
 </head>
 <body>
   <div id="container">
-    <h2>Live Segmentation с оверлеем</h2>
+    <h2>Live Segmentation – отладка графиков</h2>
 
+    <!-- Управление диапазоном кадров -->
     <div id="controls">
       <label>Стартовый кадр:
         <input type="number" id="startFrame" value="0" min="0" />
@@ -31,35 +85,27 @@
       <button id="startBtn">Запустить трансляцию</button>
     </div>
 
+    <!-- Статус и номер текущего кадра -->
     <div id="status">Статус: не подключено</div>
+    <div id="frameInfo">Кадр: —</div>
 
+    <!-- Порог для крупных объектов -->
     <div id="thresholdContainer">
       <label for="largeThreshold">Порог крупного объекта (мм): </label>
       <input type="number" id="largeThreshold" value="100" step="1" min="0" />
     </div>
-
-    <!-- Здесь будет выводиться номер текущего кадра -->
-    <div id="frameInfo">Кадр: —</div>
-
-    <img id="segmentedImage" src="" alt="Segmentation Overlay"
-         width="640" height="360" style="margin-top:20px; border:1px solid #000;" />
-
     <div id="alertLarge"></div>
 
-    <div id="charts">
-      <div>
-        <h4>Распределение диагоналей (Depth, мм)</h4>
-        <canvas id="diamChart" width="400" height="300"></canvas>
-      </div>
-      <div>
-        <h4>Распределение диагоналей (Color, мм)</h4>
-        <canvas id="diamColorChart" width="400" height="300"></canvas>
-      </div>
-      <div>
-        <h4>Распределение по X (Depth, px)</h4>
-        <canvas id="xChart" width="400" height="300"></canvas>
-      </div>
+    <!-- Блок для оверлея (RGBA image) -->
+    <div id="overlayContainer">
+      <img id="segmentedImage" src="" alt="Segmentation Overlay" />
     </div>
+
+    <!-- Контейнер для чекбоксов -->
+    <div id="checkboxContainer"></div>
+
+    <!-- Контейнер для графиков -->
+    <div id="chartsWrapper"></div>
   </div>
 
   <!-- Chart.js -->
@@ -75,75 +121,205 @@
     const endInput            = document.getElementById("endFrame");
     const frameInfoDiv        = document.getElementById("frameInfo");
 
-    // Графики
-    const diamCtx      = document.getElementById("diamChart").getContext("2d");
-    const diamColorCtx = document.getElementById("diamColorChart").getContext("2d");
-    const xCtx         = document.getElementById("xChart").getContext("2d");
+    const checkboxContainer   = document.getElementById("checkboxContainer");
+    const chartsWrapper       = document.getElementById("chartsWrapper");
 
-    const diamChart = new Chart(diamCtx, {
-      type: 'bar',
-      data: {
-        labels: [],
-        datasets: [{
-          label: 'Частота',
-          data: [],
-          backgroundColor: 'rgba(54, 162, 235, 0.6)',
-          borderColor: 'rgba(54, 162, 235, 1)',
-          borderWidth: 1
-        }]
-      },
-      options: {
-        responsive: false,
-        scales: {
-          x: { title: { display: true, text: 'Диагональ (мм)' } },
-          y: { title: { display: true, text: 'Частота' } }
-        }
+    // Объекты Chart.js: { "<suffix>": chartInstance }
+    const chartObjects = {};
+
+    let firstMessageHandled = false;
+
+    // Преобразует метку "Depth-Big" → "depth-big"
+    function makeSafeKey(label) {
+      return label.toLowerCase()
+                  .replace(/\s+/g, "_")
+                  .replace(/[^a-z0-9_\-]/g, "");
+    }
+
+    // Создаёт чекбокс для заданного type ("depth" или "color") и safeLabel
+    function createCheckbox(type, safeLabel, displayLabel) {
+      const fullSuffix = `${type}_${safeLabel}`;
+      const groupId = `checkbox-group-${type}`;
+
+      let groupDiv = document.getElementById(groupId);
+      if (!groupDiv) {
+        groupDiv = document.createElement("div");
+        groupDiv.id = groupId;
+        groupDiv.className = "checkbox-group";
+        const title = document.createElement("h4");
+        title.innerText = (type === "depth" ? "Depth-конфиги" : "Color-конфиги");
+        groupDiv.appendChild(title);
+        checkboxContainer.appendChild(groupDiv);
       }
-    });
 
-    const diamColorChart = new Chart(diamColorCtx, {
-      type: 'bar',
-      data: {
-        labels: [],
-        datasets: [{
-          label: 'Частота',
-          data: [],
-          backgroundColor: 'rgba(75, 192, 192, 0.6)',
-          borderColor: 'rgba(75, 192, 192, 1)',
-          borderWidth: 1
-        }]
-      },
-      options: {
-        responsive: false,
-        scales: {
-          x: { title: { display: true, text: 'Диагональ (мм)' } },
-          y: { title: { display: true, text: 'Частота' } }
+      const chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.id = `chk-${fullSuffix}`;
+      chk.checked = true;
+
+      const lbl = document.createElement("label");
+      lbl.htmlFor = chk.id;
+      lbl.innerText = displayLabel;
+
+      const wrap = document.createElement("div");
+      wrap.appendChild(chk);
+      wrap.appendChild(lbl);
+      groupDiv.appendChild(wrap);
+
+      // При переключении чекбокса показываем/скрываем все соответствующие графики
+      chk.addEventListener("change", () => {
+        // два суффикса: диагонали и xs
+        const suffixes = [
+          `diagonals_${type}_${safeLabel}`,
+          `xs_${type}_${safeLabel}`
+        ];
+        suffixes.forEach(suffix => {
+          const box = document.getElementById(`chart-${suffix}`);
+          if (box) {
+            box.style.display = chk.checked ? "flex" : "none";
+          }
+        });
+      });
+    }
+
+    // Создаёт контейнер <div> + <canvas> для графика с данным suffix
+    function createChartBox(titleText, suffix) {
+      const box = document.createElement("div");
+      box.className = "chart-box";
+      box.id = `chart-${suffix}`;
+      box.style.display = "flex";
+      box.style.flexDirection = "column";
+      box.style.alignItems = "center";
+
+      const heading = document.createElement("h4");
+      heading.innerText = titleText;
+      box.appendChild(heading);
+
+      const canvas = document.createElement("canvas");
+      canvas.id = `canvas-${suffix}`;
+      canvas.width = 300;
+      canvas.height = 200;
+      box.appendChild(canvas);
+
+      chartsWrapper.appendChild(box);
+      return canvas;
+    }
+
+    // При первом сообщении от сервера: создаём чекбоксы и графики под каждый пришедший конфиг
+    function handleFirstMessage(data) {
+      console.log("Первое сообщение от сервера; ключи объекта data:", Object.keys(data));
+
+      const depthLabels = new Set();
+      const colorLabels = new Set();
+
+      Object.keys(data).forEach(key => {
+        if (key.startsWith("diagonals_depth_") && key.endsWith("_mm")) {
+          // из "diagonals_depth_depth-big_mm" → "depth-big"
+          const inside = key.slice("diagonals_depth_".length, -"_mm".length);
+          depthLabels.add(inside);
         }
-      }
-    });
-
-    const xChart = new Chart(xCtx, {
-      type: 'bar',
-      data: {
-        labels: [],
-        datasets: [{
-          label: 'Частота',
-          data: [],
-          backgroundColor: 'rgba(255, 159, 64, 0.6)',
-          borderColor: 'rgba(255, 159, 64, 1)',
-          borderWidth: 1
-        }]
-      },
-      options: {
-        responsive: false,
-        scales: {
-          x: { title: { display: true, text: 'X-координата (px)' } },
-          y: { title: { display: true, text: 'Частота' } }
+        if (key.startsWith("xs_depth_")) {
+          // из "xs_depth_depth-big" → "depth-big"
+          const inside = key.slice("xs_depth_".length);
+          depthLabels.add(inside);
         }
-      }
-    });
+        if (key.startsWith("diagonals_color_") && key.endsWith("_mm")) {
+          const inside = key.slice("diagonals_color_".length, -"_mm".length);
+          colorLabels.add(inside);
+        }
+        if (key.startsWith("xs_color_")) {
+          const inside = key.slice("xs_color_".length);
+          colorLabels.add(inside);
+        }
+      });
 
-    // Универсальная функция биннинга и обновления гистограммы
+      // Создаём чекбоксы и графики для ВСЕХ обнаруженных depth-конфигов
+      depthLabels.forEach(safeLabel => {
+        // Преобразуем "depth-big" → "Depth Big" для отображения
+        const displayLabel = safeLabel
+          .split(/[-_]/g)
+          .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" ");
+        createCheckbox("depth", safeLabel, displayLabel);
+
+        // Гистограмма диагоналей (мм) для "depth-safeLabel"
+        const suffix1 = `diagonals_depth_${safeLabel}`;
+        createChartBox(`Depth [${displayLabel}] — Распределение диагоналей (мм)`, suffix1);
+        const canvas1 = document.getElementById(`canvas-${suffix1}`);
+        chartObjects[suffix1] = new Chart(canvas1.getContext("2d"), {
+          type: 'bar',
+          data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(54,162,235,0.6)', borderColor: 'rgba(54,162,235,1)', borderWidth: 1 }] },
+          options: {
+            responsive: false,
+            scales: {
+              x: { title: { display: true, text: 'Диагональ (мм)' } },
+              y: { title: { display: true, text: 'Частота' } }
+            }
+          }
+        });
+
+        // Гистограмма X-позиции (px)
+        const suffix2 = `xs_depth_${safeLabel}`;
+        createChartBox(`Depth [${displayLabel}] — Распределение по X (px)`, suffix2);
+        const canvas2 = document.getElementById(`canvas-${suffix2}`);
+        chartObjects[suffix2] = new Chart(canvas2.getContext("2d"), {
+          type: 'bar',
+          data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(255,159,64,0.6)', borderColor: 'rgba(255,159,64,1)', borderWidth: 1 }] },
+          options: {
+            responsive: false,
+            scales: {
+              x: { title: { display: true, text: 'X (px)' } },
+              y: { title: { display: true, text: 'Частота' } }
+            }
+          }
+        });
+      });
+
+      // Аналогично для color-конфигов
+      colorLabels.forEach(safeLabel => {
+        const displayLabel = safeLabel
+          .split(/[-_]/g)
+          .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" ");
+        createCheckbox("color", safeLabel, displayLabel);
+
+        // Диагонали (Color)
+        const suffix1 = `diagonals_color_${safeLabel}`;
+        createChartBox(`Color [${displayLabel}] — Распределение диагоналей (мм)`, suffix1);
+        const canvas1 = document.getElementById(`canvas-${suffix1}`);
+        chartObjects[suffix1] = new Chart(canvas1.getContext("2d"), {
+          type: 'bar',
+          data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(75,192,192,0.6)', borderColor: 'rgba(75,192,192,1)', borderWidth: 1 }] },
+          options: {
+            responsive: false,
+            scales: {
+              x: { title: { display: true, text: 'Диагональ (мм)' } },
+              y: { title: { display: true, text: 'Частота' } }
+            }
+          }
+        });
+
+        // X-позиции (Color)
+        const suffix2 = `xs_color_${safeLabel}`;
+        createChartBox(`Color [${displayLabel}] — Распределение по X (px)`, suffix2);
+        const canvas2 = document.getElementById(`canvas-${suffix2}`);
+        chartObjects[suffix2] = new Chart(canvas2.getContext("2d"), {
+          type: 'bar',
+          data: { labels: [], datasets: [{ label: 'Частота', data: [], backgroundColor: 'rgba(153,102,255,0.6)', borderColor: 'rgba(153,102,255,1)', borderWidth: 1 }] },
+          options: {
+            responsive: false,
+            scales: {
+              x: { title: { display: true, text: 'X (px)' } },
+              y: { title: { display: true, text: 'Частота' } }
+            }
+          }
+        });
+      });
+
+      firstMessageHandled = true;
+    }
+
+    // Обновляет переданный график гистограммой по массиву values
     function updateHistogram(chartObj, values, numBins) {
       if (!values || values.length === 0) {
         chartObj.data.labels = [];
@@ -151,41 +327,32 @@
         chartObj.update();
         return;
       }
-      // Если мало значений, используем уникальные корзины
       if (values.length <= numBins) {
-        const uniqueMap = new Map();
+        const m = new Map();
         values.forEach(v => {
           const key = v.toFixed(1);
-          uniqueMap.set(key, (uniqueMap.get(key) || 0) + 1);
+          m.set(key, (m.get(key) || 0) + 1);
         });
-        const labels = Array.from(uniqueMap.keys());
-        const counts = Array.from(uniqueMap.values());
-        chartObj.data.labels = labels;
-        chartObj.data.datasets[0].data = counts;
+        chartObj.data.labels = Array.from(m.keys());
+        chartObj.data.datasets[0].data = Array.from(m.values());
         chartObj.update();
         return;
       }
-      // Иначе равномерное деление на numBins
-      const minVal = Math.min(...values);
-      const maxVal = Math.max(...values);
-      if (minVal === maxVal) {
-        chartObj.data.labels = [minVal.toFixed(1)];
+      const minV = Math.min(...values), maxV = Math.max(...values);
+      if (minV === maxV) {
+        chartObj.data.labels = [minV.toFixed(1)];
         chartObj.data.datasets[0].data = [values.length];
         chartObj.update();
         return;
       }
-      const bins = numBins;
-      const range = maxVal - minVal;
-      const binSize = range / bins;
-      const labels = [];
-      const counts = new Array(bins).fill(0);
+      const bins = numBins, range = maxV - minV, binSize = range / bins;
+      const labels = [], counts = new Array(bins).fill(0);
       for (let i = 0; i < bins; i++) {
-        const left = minVal + i * binSize;
-        const right = left + binSize;
+        const left = minV + i * binSize, right = left + binSize;
         labels.push(left.toFixed(1) + "–" + right.toFixed(1));
       }
       values.forEach(v => {
-        let idx = Math.floor((v - minVal) / binSize);
+        let idx = Math.floor((v - minV) / binSize);
         if (idx < 0) idx = 0;
         if (idx >= bins) idx = bins - 1;
         counts[idx]++;
@@ -196,17 +363,14 @@
     }
 
     function startWebSocket() {
-      // Прочитаем start/end из полей
       const startVal = parseInt(startInput.value, 10);
       const endVal   = parseInt(endInput.value, 10);
-
       if (isNaN(startVal) || isNaN(endVal) || startVal < 0 || endVal < startVal) {
         alert("Введите корректный диапазон: end ≥ start, оба ≥ 0.");
         return;
       }
       if (ws !== null) return;
 
-      // Формируем URL с параметрами ?start=...&end=...
       const url = `ws://${window.location.host}/ws?start=${startVal}&end=${endVal}`;
       ws = new WebSocket(url);
 
@@ -218,28 +382,83 @@
       ws.onmessage = event => {
         const data = JSON.parse(event.data);
 
-        // 1) Обновляем оверлейное изображение
+        // Отладка: выведем в консоль лайв-данные 
+        console.log("Получено от сервера:", data);
+
+        // 1) Обновляем оверлей
         imgElem.src = "data:image/png;base64," + data.overlay_b64;
 
-        // 2) Обновляем номер текущего кадра
+        // 2) Номер кадра
         frameInfoDiv.innerText = `Кадр: ${data.frame}`;
 
-        // 3) Проверяем «крупные» объекты по порогу
+        // 3) Если это первое сообщение — создаём чекбоксы и холсты
+        if (!firstMessageHandled) {
+          handleFirstMessage(data);
+        }
+
+        // 4) Проверяем крупные элементы (диагонали ≥ threshold)
         const thr = parseFloat(largeThresholdInput.value) || 0;
-        const hasLargeDepth = data.diagonals_depth_mm.some(d => d >= thr);
-        const hasLargeColor = data.diagonals_color_mm.some(d => d >= thr);
-        alertLarge.innerText = (hasLargeDepth || hasLargeColor) 
-          ? "Найдены крупные элементы!" 
-          : "";
+        let foundLarge = false;
+        Object.entries(data).forEach(([key, arr]) => {
+          if (!Array.isArray(arr)) return;
+          if ((key.startsWith("diagonals_depth_") && key.endsWith("_mm")) ||
+              (key.startsWith("diagonals_color_") && key.endsWith("_mm"))) {
+            for (let v of arr) {
+              if (v >= thr) {
+                foundLarge = true;
+                break;
+              }
+            }
+          }
+        });
+        alertLarge.innerText = foundLarge ? "Найдены крупные элементы!" : "";
 
-        // 4) Обновляем гистограмму Depth (диагонали)
-        updateHistogram(diamChart, data.diagonals_depth_mm, 20);
+        // 5) Обновляем графики: для каждого ключа-значения
+        Object.keys(data).forEach(key => {
+          const val = data[key];
+          if (!Array.isArray(val)) return;  // пропускаем не-массивы
 
-        // 5) Обновляем гистограмму Color (диагонали)
-        updateHistogram(diamColorChart, data.diagonals_color_mm, 20);
+          // Если ключ типа "diagonals_depth_depth-big_mm" или "xs_color_color-small"
+          // уберём окончание "_mm", чтобы получить "diagonals_depth_depth-big"
+          let suffix = key;
+          if ((key.startsWith("diagonals_depth_") || key.startsWith("diagonals_color_")) && key.endsWith("_mm")) {
+            suffix = key.slice(0, -("_mm".length));
+          }
 
-        // 6) Обновляем гистограмму по X (только Depth)
-        updateHistogram(xChart, data.xs_depth, 20);
+          // Найдём созданный ранее Chart.js по этому suffix
+          const chartObj = chartObjects[suffix];
+          if (!chartObj) {
+            console.warn(`Chart-объект не найден для suffix="${suffix}" (key="${key}")`);
+            return;
+          }
+
+          // Определяем id чекбокса:
+          let chkId = null;
+          if (suffix.startsWith("diagonals_depth_") || suffix.startsWith("xs_depth_")) {
+            // "diagonals_depth_depth-big" → safeLabel="depth-big"
+            const safeLabel = suffix.replace(/^(diagonals_depth_|xs_depth_)/, "");
+            chkId = `chk-depth_${safeLabel}`;
+          } else if (suffix.startsWith("diagonals_color_") || suffix.startsWith("xs_color_")) {
+            const safeLabel = suffix.replace(/^(diagonals_color_|xs_color_)/, "");
+            chkId = `chk-color_${safeLabel}`;
+          }
+
+          if (!chkId) return;
+          const chk = document.getElementById(chkId);
+          if (!chk) {
+            console.warn(`Чекбокс не найден для suffix="${suffix}" => chkId="${chkId}"`);
+            return;
+          }
+          // Если чекбокс включён, обновляем соответствующую диаграмму
+          if (chk.checked) {
+            updateHistogram(chartObj, val, 20);
+          } else {
+            // Если отключено, просто очищаем данные
+            chartObj.data.labels = [];
+            chartObj.data.datasets[0].data = [];
+            chartObj.update();
+          }
+        });
       };
 
       ws.onclose = () => {
