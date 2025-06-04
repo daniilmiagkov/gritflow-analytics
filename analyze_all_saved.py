@@ -12,14 +12,14 @@ from zed.zed_loader import get_intrinsics_from_svo
 
 def load_saved_depth(frame_number: int) -> np.ndarray:
     """Загружает сохранённую карту глубины (TIFF, float32)."""
-    path = os.path.join(OUTPUT_DIR, f"frame_{frame_number}_depth.tiff")
+    path = os.path.join(OUTPUT_DIR, "depth_depth-big", f"depth_seg_depth-big_frame_{frame_number}.tiff")
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Глубина не найдена: {path}")
     return tifffile.imread(path)
 
 def load_saved_color(frame_number: int) -> np.ndarray:
     """Загружает сохранённое цветное изображение."""
-    path = os.path.join(OUTPUT_DIR, f"frame_{frame_number}_color.png")
+    path = os.path.join(OUTPUT_DIR, "color_small", f"color_seg_small_frame_{frame_number}.png")
     img = cv2.imread(path, cv2.IMREAD_COLOR)
     if img is None:
         raise FileNotFoundError(f"Цветное изображение не найдено: {path}")
