@@ -11,7 +11,7 @@ def init_camera(svo_path):
     init_params.depth_minimum_distance = float(config.DEPTH_MIN)  # минимум из конфига
     init_params.depth_maximum_distance = float(config.DEPTH_MAX)  # максимум из конфига
     init_params.coordinate_units = sl.UNIT.MILLIMETER
-    init_params.depth_stabilization = True
+    init_params.depth_stabilization = False
 
     if zed.open(init_params) != sl.ERROR_CODE.SUCCESS:
         raise RuntimeError("Не удалось открыть SVO-файл")
