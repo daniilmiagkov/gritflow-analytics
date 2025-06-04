@@ -8,7 +8,7 @@ OUTPUT_DIR = r"C:\files\study\suai\diploma\data\output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Кадр
-FRAME_NUMBER = 1870
+FRAME_NUMBER = 1730
 
 
 # config.py
@@ -18,7 +18,7 @@ CROP = True
 CROP_X = 100  # x-координата верхнего левого угла
 CROP_Y = 200  # y-координата верхнего левого угла
 CROP_WIDTH = 800
-CROP_HEIGHT = 350
+CROP_HEIGHT = 300
 # Диапазон допустимых глубин в мм
 DEPTH_MIN = 990
 DEPTH_MAX = 2500
