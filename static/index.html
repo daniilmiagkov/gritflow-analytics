@@ -19,8 +19,7 @@
     #overlayContainer {
       margin-top: 20px;
       border: 1px solid #000;
-      width: 640px;
-      height: 360px;
+      aspect-ratio: 800/300;
     }
     #segmentedImage {
       width: 100%;
@@ -72,8 +71,6 @@
 </head>
 <body>
   <div id="container">
-    <h2>Live Segmentation – отладка графиков</h2>
-
     <!-- Управление диапазоном кадров -->
     <div id="controls">
       <label>Стартовый кадр:
@@ -89,12 +86,6 @@
     <div id="status">Статус: не подключено</div>
     <div id="frameInfo">Кадр: —</div>
 
-    <!-- Порог для крупных объектов -->
-    <div id="thresholdContainer">
-      <label for="largeThreshold">Порог крупного объекта (мм): </label>
-      <input type="number" id="largeThreshold" value="100" step="1" min="0" />
-    </div>
-    <div id="alertLarge"></div>
 
     <!-- Блок для оверлея (RGBA image) -->
     <div id="overlayContainer">
@@ -106,6 +97,14 @@
 
     <!-- Контейнер для графиков -->
     <div id="chartsWrapper"></div>
+
+    <!-- Порог для крупных объектов -->
+    <div id="thresholdContainer">
+      <label for="largeThreshold">Порог крупного объекта (мм): </label>
+      <input type="number" id="largeThreshold" value="100" step="1" min="0" />
+    </div>
+
+    <div id="alertLarge"></div>
   </div>
 
   <!-- Chart.js -->
